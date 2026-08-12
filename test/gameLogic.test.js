@@ -1,7 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
-const { addRule, chooseTarget, chooseTransferCard, passTurn, playCards } = require('../src/gameLogic');
+const { addRule, chooseTarget, chooseTransferCard, leavePlayer, passTurn, playCards } = require('../src/gameLogic');
 
 function card(id, rank, suit) {
   return { id, rank, suit, joker: false };
@@ -177,4 +177,63 @@ test('隠しルールは発動後に公開される', () => {
   playCards(room, 'p1', ['a']);
   assert.equal(room.rules[0].revealed, true);
   assert.equal(room.game.direction, -1);
+});
+
+test('開始前はホスト以外も特殊ルールを追加できる', () => {
+  const room = makeRoom({
+    p1: [],
+    p2: []
+  });
+  room.status = 'lobby';
+  room.game = null;
+
+  addRule(room, 'p2', {
+    condition: { rank: '7' },
+    effect: 'skip',
+    target: 'next'
+  });
+
+  assert.equal(room.rules.length, 1);
+  assert.equal(room.rules[0].createdBy, 'p2');
+});
+
+test('ロビーでホストが退出すると次のプレイヤーへホストを移す', () => {
+  const room = makeRoom({
+    p1: [],
+    p2: []
+  });
+  room.status = 'lobby';
+  room.game = null;
+
+  leavePlayer(room, 'p1');
+
+  assert.equal(room.players.some((player) => player.id === 'p1'), false);
+  assert.equal(room.hostId, 'p2');
+});
+
+test('ゲーム中に現在プレイヤーが途中退出すると次のプレイヤーへ進む', () => {
+  const room = makeRoom({
+    p1: [card('a', '7', 'S')],
+    p2: [card('b', '8', 'S')],
+    p3: [card('c', '9', 'S')]
+  });
+
+  leavePlayer(room, 'p1');
+
+  assert.equal(room.players.find((player) => player.id === 'p1').left, true);
+  assert.equal(room.players.find((player) => player.id === 'p1').hand.length, 0);
+  assert.equal(room.game.currentPlayerId, 'p2');
+});
+
+test('ゲーム中の途中退出で残り1人になったらゲーム終了', () => {
+  const room = makeRoom({
+    p1: [card('a', '7', 'S')],
+    p2: [card('b', '8', 'S')]
+  });
+
+  leavePlayer(room, 'p2');
+
+  assert.equal(room.status, 'finished');
+  assert.equal(room.players.find((player) => player.id === 'p1').finishedRank, 1);
+  assert.equal(room.players.find((player) => player.id === 'p2').left, true);
 });

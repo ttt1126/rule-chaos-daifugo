@@ -146,6 +146,34 @@ function registerSocketHandlers(io, manager) {
       });
     });
 
+    socket.on('leaveRoom', (payload, ack) => {
+      try {
+        const { room, playerId } = requireSocketRoom(socket, payload);
+        const result = manager.leaveRoom(room, playerId);
+        for (const socketId of result.leftSocketIds) {
+          const leavingSocket = io.sockets.sockets.get(socketId);
+          if (!leavingSocket) continue;
+
+          leavingSocket.leave(room.code);
+          leavingSocket.data.roomCode = null;
+          leavingSocket.data.playerId = null;
+          leavingSocket.emit('leftRoom');
+        }
+        if (!result.roomClosed) {
+          emitRoomState(room);
+        }
+        if (typeof ack === 'function') {
+          ack({ ok: true, left: true });
+        }
+      } catch (error) {
+        if (typeof ack === 'function') {
+          ack({ ok: false, error: error.message });
+        } else {
+          socket.emit('errorMessage', error.message);
+        }
+      }
+    });
+
     socket.on('disconnect', () => {
       const room = manager.detachSocket(socket.id);
       if (room) {

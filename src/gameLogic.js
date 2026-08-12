@@ -47,12 +47,12 @@ function requirePlayer(room, playerId) {
 }
 
 function activePlayers(room) {
-  return room.players.filter((player) => !player.finishedRank);
+  return room.players.filter((player) => !player.left && !player.finishedRank);
 }
 
 function isActive(room, playerId) {
   const player = getPlayer(room, playerId);
-  return Boolean(player && !player.finishedRank);
+  return Boolean(player && !player.left && !player.finishedRank);
 }
 
 function nextActivePlayerId(room, fromPlayerId) {
@@ -64,7 +64,7 @@ function nextActivePlayerId(room, fromPlayerId) {
   for (let step = 1; step <= room.players.length; step += 1) {
     const index = (startIndex + step * direction + room.players.length * 10) % room.players.length;
     const player = room.players[index];
-    if (!player.finishedRank) {
+    if (!player.left && !player.finishedRank) {
       return player.id;
     }
   }
@@ -129,8 +129,12 @@ function updateSettings(room, playerId, settings) {
 }
 
 function addRule(room, playerId, input, options = {}) {
-  if (!options.system && room.hostId !== playerId) {
-    throw new Error('ホストのみルールを追加できます');
+  const player = options.system ? null : requirePlayer(room, playerId);
+  if (player?.left) {
+    throw new Error('退出したプレイヤーはルールを追加できません');
+  }
+  if (!options.system && room.status !== 'lobby' && room.hostId !== playerId) {
+    throw new Error('ゲーム開始後はホストのみルールを追加できます');
   }
   if (room.status === 'finished') {
     throw new Error('終了したゲームにはルールを追加できません');
@@ -171,10 +175,11 @@ function startGame(room, playerId, options = {}) {
   if (room.status !== 'lobby') {
     throw new Error('ゲームはすでに開始されています');
   }
-  if (room.players.length < 2) {
+  const joinedPlayers = room.players.filter((player) => !player.left);
+  if (joinedPlayers.length < 2) {
     throw new Error('2人以上で開始してください');
   }
-  if (room.players.length > 4) {
+  if (joinedPlayers.length > 4) {
     throw new Error('最大4人までです');
   }
 
@@ -182,7 +187,7 @@ function startGame(room, playerId, options = {}) {
   const hiddenRuleCount = normalizeHiddenRuleCount(room.settings.hiddenRuleCount);
   const deck = shuffle(createDeck(), options.rng);
 
-  for (const player of room.players) {
+  for (const player of joinedPlayers) {
     player.hand = [];
     player.finishedRank = null;
     player.skipTurns = 0;
@@ -190,9 +195,9 @@ function startGame(room, playerId, options = {}) {
   }
 
   deck.forEach((card, index) => {
-    room.players[index % room.players.length].hand.push(card);
+    joinedPlayers[index % joinedPlayers.length].hand.push(card);
   });
-  for (const player of room.players) {
+  for (const player of joinedPlayers) {
     player.hand = sortHand(player.hand);
   }
 
@@ -210,7 +215,7 @@ function startGame(room, playerId, options = {}) {
   room.status = 'playing';
   room.game = {
     direction: 1,
-    currentPlayerId: room.players[0].id,
+    currentPlayerId: joinedPlayers[0].id,
     table: null,
     lastPlayBy: null,
     passes: [],
@@ -310,7 +315,7 @@ function playCards(room, playerId, cardIds) {
   }
 
   const player = requirePlayer(room, playerId);
-  if (player.finishedRank) {
+  if (player.left || player.finishedRank) {
     throw new Error('すでに上がっています');
   }
 
@@ -372,6 +377,9 @@ function passTurn(room, playerId) {
   }
 
   const player = requirePlayer(room, playerId);
+  if (player.left || player.finishedRank) {
+    throw new Error('参加中のプレイヤーではありません');
+  }
   room.game.passes = [...new Set([...room.game.passes, playerId])];
   addEvent(room, `${player.name}さんがパスしました`, 'pass');
 
@@ -491,7 +499,7 @@ function resolveTargets(room, effectAction) {
     return (effectAction.selectedTargetIds || [])
       .map((targetId) => getPlayer(room, targetId))
       .filter(Boolean)
-      .filter((target) => !target.finishedRank);
+      .filter((target) => !target.left && !target.finishedRank);
   }
 
   return [];
@@ -617,7 +625,7 @@ function completeResolvedAction(room) {
 
 function markFinishedPlayers(room) {
   for (const player of room.players) {
-    if (!player.finishedRank && player.hand.length === 0) {
+    if (!player.left && !player.finishedRank && player.hand.length === 0) {
       player.finishedRank = room.game.rankings.length + 1;
       room.game.rankings.push(player.id);
       addEvent(room, `${player.name}さんが${player.finishedRank}位で上がりました`, 'finish');
@@ -653,7 +661,7 @@ function setCurrentPlayerWithSkips(room, candidateId) {
   while (nextId && guard < room.players.length * 3) {
     guard += 1;
     const player = getPlayer(room, nextId);
-    if (!player || player.finishedRank) {
+    if (!player || player.left || player.finishedRank) {
       nextId = nextActivePlayerId(room, nextId);
       continue;
     }
@@ -711,6 +719,102 @@ function directionLabel(room) {
   return room.game?.direction === -1 ? '反時計回り' : '時計回り';
 }
 
+function leavePlayer(room, playerId) {
+  const player = requirePlayer(room, playerId);
+  if (player.left) {
+    throw new Error('すでに退出しています');
+  }
+
+  if (room.status === 'lobby') {
+    const playerName = player.name;
+    const wasHost = room.hostId === playerId;
+    room.players = room.players.filter((candidate) => candidate.id !== playerId);
+    if (wasHost) {
+      room.hostId = room.players[0]?.id || null;
+    }
+    addEvent(room, `${playerName}さんが退出しました`, 'system');
+    if (wasHost && room.hostId && room.players.length > 0) {
+      const host = getPlayer(room, room.hostId);
+      addEvent(room, `${host.name}さんがホストになりました`, 'system');
+    }
+    return { roomClosed: room.players.length === 0 };
+  }
+
+  player.left = true;
+  player.connected = false;
+  player.disconnectedAt = Date.now();
+  player.hand = [];
+  player.skipTurns = 0;
+  player.bindingSuit = null;
+
+  if (room.hostId === playerId) {
+    const nextHost = room.players.find((candidate) => !candidate.left);
+    room.hostId = nextHost?.id || null;
+    if (nextHost) {
+      addEvent(room, `${nextHost.name}さんがホストになりました`, 'system');
+    }
+  }
+
+  addEvent(room, `${player.name}さんが退出しました`, room.status === 'playing' ? 'finish' : 'system');
+
+  if (room.status === 'playing') {
+    handlePlayingLeave(room, playerId);
+  }
+
+  return { roomClosed: room.players.every((candidate) => candidate.left) };
+}
+
+function handlePlayingLeave(room, playerId) {
+  const game = room.game;
+  game.passes = game.passes.filter((id) => id !== playerId);
+
+  if (game.pendingAction?.actorId === playerId) {
+    game.effectQueue = game.effectQueue.filter((action) => action.actorId !== playerId);
+    game.pendingAction = null;
+    game.phase = 'playing';
+    addEvent(room, '退出により未処理の特殊ルールを取り消しました', 'rule');
+    continueEffectQueue(room);
+    return;
+  }
+
+  if (game.pendingAction?.type === 'target') {
+    game.pendingAction.eligibleTargetIds = game.pendingAction.eligibleTargetIds.filter((id) =>
+      isActive(room, id)
+    );
+    if (game.pendingAction.eligibleTargetIds.length === 0) {
+      game.effectQueue.shift();
+      game.pendingAction = null;
+      game.phase = 'playing';
+      addEvent(room, '対象がいなくなったため特殊ルールは不発になりました', 'rule');
+      continueEffectQueue(room);
+      return;
+    }
+  }
+
+  if (game.pendingAction?.type === 'giftCard' && game.pendingAction.targetPlayerId === playerId) {
+    game.effectQueue.shift();
+    game.pendingAction = null;
+    game.phase = 'playing';
+    addEvent(room, '渡す相手が退出したため特殊ルールは不発になりました', 'rule');
+    continueEffectQueue(room);
+    return;
+  }
+
+  if (finishGameIfReady(room)) {
+    return;
+  }
+
+  if (shouldClearBecauseAllOthersPassed(room)) {
+    clearTableAfterPasses(room);
+    return;
+  }
+
+  if (game.currentPlayerId === playerId) {
+    setCurrentPlayerWithSkips(room, nextActivePlayerId(room, playerId));
+    return;
+  }
+}
+
 module.exports = {
   addEvent,
   addRule,
@@ -720,6 +824,7 @@ module.exports = {
   directionLabel,
   getPlayer,
   isGamePaused,
+  leavePlayer,
   nextActivePlayerId,
   passTurn,
   playCards,

@@ -65,6 +65,10 @@ function connectSocket() {
   socket.on('errorMessage', (error) => {
     showMessage(error);
   });
+
+  socket.on('leftRoom', () => {
+    leaveLocalRoom('退出しました');
+  });
 }
 
 document.addEventListener('submit', (event) => {
@@ -91,10 +95,16 @@ document.addEventListener('click', (event) => {
     emit('reconnectRoom', session);
   }
   if (action === 'forget') {
-    session = null;
-    roomState = null;
-    localStorage.removeItem(STORAGE_KEY);
-    render();
+    leaveLocalRoom('');
+  }
+  if (action === 'leave') {
+    const isPlaying = roomState?.status === 'playing';
+    if (isPlaying && !window.confirm('途中退出するとこのゲームには戻れません。退出しますか？')) {
+      return;
+    }
+    emitAuthed('leaveRoom', {}, () => {
+      leaveLocalRoom('退出しました');
+    });
   }
   if (action === 'start') {
     emitAuthed('startGame', {});
@@ -204,6 +214,15 @@ function saveCredentials(response) {
   render();
 }
 
+function leaveLocalRoom(text) {
+  session = null;
+  roomState = null;
+  selectedCardIds.clear();
+  localStorage.removeItem(STORAGE_KEY);
+  message = text;
+  render();
+}
+
 function loadSession() {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
@@ -245,8 +264,11 @@ function render() {
           <h1>ルール追加型大富豪</h1>
           ${roomState ? `<p class="room-code">部屋 ${escapeHtml(roomState.code)}</p>` : ''}
         </div>
-        <div class="connection ${socket?.connected ? 'online' : 'offline'}">
-          ${socket?.connected ? '接続中' : '未接続'}
+        <div class="top-actions">
+          ${roomState ? '<button class="ghost danger" data-click="leave" type="button">退出</button>' : ''}
+          <div class="connection ${socket?.connected ? 'online' : 'offline'}">
+            ${socket?.connected ? '接続中' : '未接続'}
+          </div>
         </div>
       </header>
       ${message ? `<div class="message">${escapeHtml(message)}</div>` : ''}
@@ -313,7 +335,7 @@ function renderLobby() {
         ${roomState.isHost ? renderHostSettings() : '<section class="panel"><h2>ホストの開始待ちです</h2></section>'}
       </div>
       <aside class="side-column">
-        ${roomState.isHost ? renderRuleBuilder() : ''}
+        ${renderRuleBuilder()}
         ${renderRules()}
         ${renderEvents()}
       </aside>
@@ -381,7 +403,7 @@ function renderPlayers() {
                   <strong>${escapeHtml(player.name)}${player.isYou ? '（あなた）' : ''}</strong>
                   <div class="player-meta">
                     ${player.isHost ? '<span>ホスト</span>' : ''}
-                    <span>${player.connected ? '接続中' : '切断中'}</span>
+                    <span>${player.left ? '退出' : player.connected ? '接続中' : '切断中'}</span>
                     ${player.finishedRank ? `<span>${player.finishedRank}位</span>` : ''}
                     ${player.skipTurns ? `<span>スキップ ${player.skipTurns}</span>` : ''}
                     ${player.bindingSuit ? `<span>縛り ${player.bindingSuitLabel}</span>` : ''}
@@ -493,7 +515,8 @@ function renderHand() {
   const player = ownPlayer();
   const hand = player?.hand || [];
   const game = roomState.game;
-  const disabled = !game?.isYourTurn || game?.paused || Boolean(game?.pendingAction) || roomState.status !== 'playing';
+  const disabled =
+    player?.left || !game?.isYourTurn || game?.paused || Boolean(game?.pendingAction) || roomState.status !== 'playing';
 
   return `
     <section class="hand-area">

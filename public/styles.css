@@ -65,6 +65,11 @@ button:disabled {
   background: transparent;
 }
 
+.danger {
+  border-color: #e2b7aa;
+  color: #9c331f;
+}
+
 .app-shell {
   width: min(1180px, 100%);
   margin: 0 auto;
@@ -77,6 +82,12 @@ button:disabled {
   justify-content: space-between;
   gap: 12px;
   padding: 10px 0 16px;
+}
+
+.top-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
 h1,
@@ -440,5 +451,10 @@ form,
   .card-face,
   .card-button {
     min-height: 68px;
+  }
+
+  .top-actions {
+    align-items: flex-end;
+    flex-direction: column-reverse;
   }
 }

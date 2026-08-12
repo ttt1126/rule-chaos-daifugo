@@ -9,6 +9,7 @@ const {
   chooseTransferCard,
   directionLabel,
   isGamePaused,
+  leavePlayer,
   passTurn,
   playCards,
   startGame,
@@ -69,6 +70,9 @@ function createRoomManager() {
     if (!player || player.reconnectToken !== reconnectToken) {
       throw new Error('再接続情報が一致しません');
     }
+    if (player.left) {
+      throw new Error('退出済みのプレイヤーには再接続できません');
+    }
 
     player.connected = true;
     player.disconnectedAt = null;
@@ -90,6 +94,10 @@ function createRoomManager() {
         if (!player.socketIds.has(socketId)) continue;
 
         player.socketIds.delete(socketId);
+        if (player.left) {
+          touch(room);
+          return room;
+        }
         if (player.socketIds.size === 0) {
           player.connected = false;
           player.disconnectedAt = Date.now();
@@ -125,10 +133,11 @@ function createRoomManager() {
         isHost: player.id === room.hostId,
         isYou: player.id === viewerId,
         connected: player.connected,
+        left: Boolean(player.left),
         disconnectedAt: player.disconnectedAt,
         disconnectGraceMs: DISCONNECT_GRACE_MS,
-        cardCount: player.hand.length,
-        hand: player.id === viewerId ? sortHand(player.hand).map(publicCard) : null,
+        cardCount: player.left ? 0 : player.hand.length,
+        hand: player.id === viewerId && !player.left ? sortHand(player.hand).map(publicCard) : null,
         finishedRank: player.finishedRank,
         skipTurns: player.skipTurns,
         bindingSuit: player.bindingSuit,
@@ -195,6 +204,19 @@ function createRoomManager() {
       dispatch(room, () => chooseTarget(room, playerId, pendingId, targetPlayerId)),
     chooseTransferCard: (room, playerId, pendingId, cardId) =>
       dispatch(room, () => chooseTransferCard(room, playerId, pendingId, cardId)),
+    leaveRoom: (room, playerId) => {
+      const player = room.players.find((candidate) => candidate.id === playerId);
+      if (!player) {
+        throw new Error('プレイヤーが見つかりません');
+      }
+      const leftSocketIds = [...player.socketIds];
+      const result = dispatch(room, () => leavePlayer(room, playerId));
+      player.socketIds.clear();
+      if (result.roomClosed) {
+        rooms.delete(room.code);
+      }
+      return { ...result, leftSocketIds };
+    },
     passTurn: (room, playerId) => dispatch(room, () => passTurn(room, playerId)),
     playCards: (room, playerId, cardIds) => dispatch(room, () => playCards(room, playerId, cardIds)),
     startGame: (room, playerId) => dispatch(room, () => startGame(room, playerId)),
@@ -247,12 +269,13 @@ function getViewerPendingAction(room, viewerId) {
       waitingForYou: true,
       eligibleTargets: pending.eligibleTargetIds.map((targetId) => {
         const target = room.players.find((player) => player.id === targetId);
+        if (!target) return null;
         return {
           id: target.id,
           name: target.name,
           cardCount: target.hand.length
         };
-      })
+      }).filter(Boolean)
     };
   }
 
@@ -283,6 +306,7 @@ function createPlayer(name) {
     name,
     reconnectToken: makeReconnectToken(),
     connected: true,
+    left: false,
     disconnectedAt: null,
     socketIds: new Set(),
     hand: [],
