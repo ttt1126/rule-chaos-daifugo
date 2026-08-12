@@ -2,6 +2,12 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const { addRule, chooseTarget, chooseTransferCard, leavePlayer, passTurn, playCards } = require('../src/gameLogic');
+const {
+  calculateConditionPower,
+  conditionUnlocksTarget,
+  effectSupportsTarget,
+  normalizeRuleInput
+} = require('../src/ruleEngine');
 
 function card(id, rank, suit) {
   return { id, rank, suit, joker: false };
@@ -48,6 +54,63 @@ function makeRoom(hands) {
     }
   };
 }
+
+test('conditionPowerは条件から計算され、最大4で止まる', () => {
+  assert.equal(calculateConditionPower({ count: 1 }), 1);
+  assert.equal(calculateConditionPower({ count: 2 }), 2);
+  assert.equal(calculateConditionPower({ count: 3 }), 3);
+  assert.equal(calculateConditionPower({ count: 4 }), 4);
+  assert.equal(calculateConditionPower({ rank: '7' }), 2);
+  assert.equal(calculateConditionPower({ suit: 'S' }), 2);
+  assert.equal(calculateConditionPower({ rank: 'JOKER' }), 3);
+  assert.equal(calculateConditionPower({ rank: '7', suit: 'S', count: 1 }), 4);
+});
+
+test('conditionPowerに応じて対象コネクタが解放される', () => {
+  assert.equal(conditionUnlocksTarget({ count: 1 }, 'self'), true);
+  assert.equal(conditionUnlocksTarget({ count: 1 }, 'next'), false);
+  assert.equal(conditionUnlocksTarget({ count: 2 }, 'next'), true);
+  assert.equal(conditionUnlocksTarget({ count: 2 }, 'any'), false);
+  assert.equal(conditionUnlocksTarget({ rank: '7', count: 1 }, 'any'), true);
+  assert.equal(conditionUnlocksTarget({ rank: '7', count: 1 }, 'all'), false);
+  assert.equal(conditionUnlocksTarget({ rank: '7', suit: 'S' }, 'all'), true);
+});
+
+test('効果と対象属性の互換性を判定できる', () => {
+  assert.equal(effectSupportsTarget('skip', 'self'), true);
+  assert.equal(effectSupportsTarget('skip', 'next'), true);
+  assert.equal(effectSupportsTarget('skip', 'any'), true);
+  assert.equal(effectSupportsTarget('skip', 'all'), false);
+  assert.equal(effectSupportsTarget('bindSuit', 'self'), true);
+  assert.equal(effectSupportsTarget('bindSuit', 'next'), true);
+  assert.equal(effectSupportsTarget('bindSuit', 'any'), true);
+  assert.equal(effectSupportsTarget('bindSuit', 'all'), true);
+  assert.equal(effectSupportsTarget('gift', 'next'), true);
+  assert.equal(effectSupportsTarget('gift', 'any'), true);
+  assert.equal(effectSupportsTarget('gift', 'self'), false);
+  assert.equal(effectSupportsTarget('gift', 'all'), false);
+  assert.equal(effectSupportsTarget('reverse', 'none'), true);
+  assert.equal(effectSupportsTarget('reverse', 'next'), false);
+  assert.equal(effectSupportsTarget('clear', 'none'), true);
+  assert.equal(effectSupportsTarget('clear', 'next'), false);
+});
+
+test('4段コネクタの成立と不成立をサーバー側で検証する', () => {
+  assert.throws(() => normalizeRuleInput({ condition: {}, target: 'self', effect: 'skip' }), /条件/);
+  assert.doesNotThrow(() => normalizeRuleInput({ condition: { rank: '7' }, target: 'next', effect: 'skip' }));
+  assert.throws(() => normalizeRuleInput({ condition: { rank: '7' }, target: 'any', effect: 'skip' }), /条件パワー/);
+  assert.doesNotThrow(() =>
+    normalizeRuleInput({ condition: { rank: '7', count: 1 }, target: 'any', effect: 'skip' })
+  );
+  assert.doesNotThrow(() =>
+    normalizeRuleInput({ condition: { rank: '7', suit: 'S' }, target: 'none', effect: 'clear' })
+  );
+  assert.throws(() => normalizeRuleInput({ condition: { count: 4 }, target: 'self', effect: 'gift' }), /対象にできません/);
+  assert.throws(() => normalizeRuleInput({ condition: { count: 4 }, target: 'all', effect: 'skip' }), /対象にできません/);
+  assert.doesNotThrow(() =>
+    normalizeRuleInput({ condition: { count: 4 }, target: 'all', effect: 'bindSuit' })
+  );
+});
 
 test('同じ数字の複数枚出しと場より強い判定を行う', () => {
   const room = makeRoom({
@@ -100,7 +163,7 @@ test('任意対象スキップは対象選択後に次回機会を飛ばす', ()
   });
 
   addRule(room, 'p1', {
-    condition: { rank: '7' },
+    condition: { rank: '7', count: 1 },
     effect: 'skip',
     target: 'any'
   });
@@ -141,7 +204,7 @@ test('渡すは対象決定後にサーバー上の手札を移動する', () =>
   });
 
   addRule(room, 'p1', {
-    condition: { rank: '7' },
+    condition: { rank: '7', count: 1 },
     effect: 'gift',
     target: 'any'
   });
@@ -166,7 +229,7 @@ test('隠しルールは発動後に公開される', () => {
     room,
     'p1',
     {
-      condition: { suit: 'S' },
+      condition: { rank: '7', suit: 'S' },
       effect: 'reverse',
       target: 'none'
     },
@@ -177,6 +240,42 @@ test('隠しルールは発動後に公開される', () => {
   playCards(room, 'p1', ['a']);
   assert.equal(room.rules[0].revealed, true);
   assert.equal(room.game.direction, -1);
+});
+
+test('Power不足のGLOBAL効果は追加できない', () => {
+  const room = makeRoom({
+    p1: [],
+    p2: []
+  });
+  room.status = 'lobby';
+  room.game = null;
+
+  assert.throws(
+    () =>
+      addRule(room, 'p1', {
+        condition: { count: 1 },
+        effect: 'clear',
+        target: 'none'
+      }),
+    /条件パワー/
+  );
+});
+
+test('流す効果はPower 4なら追加できる', () => {
+  const room = makeRoom({
+    p1: [],
+    p2: []
+  });
+  room.status = 'lobby';
+  room.game = null;
+
+  addRule(room, 'p1', {
+    condition: { rank: '7', suit: 'S' },
+    effect: 'clear',
+    target: 'none'
+  });
+
+  assert.equal(room.rules.length, 1);
 });
 
 test('開始前はホスト以外も特殊ルールを追加できる', () => {

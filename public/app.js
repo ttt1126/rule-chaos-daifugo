@@ -7,27 +7,63 @@ const SUITS = [
   ['D', '♦'],
   ['C', '♣']
 ];
-const EFFECTS = [
-  ['skip', 'スキップ'],
-  ['bindSuit', '縛り'],
-  ['reverse', 'リバース'],
-  ['clear', '流す'],
-  ['gift', '渡す']
+const CONNECTORS = [
+  { id: 'SELF', level: 1, label: '自分', shortLabel: 'SELF' },
+  { id: 'NEXT', level: 2, label: '次', shortLabel: 'NEXT' },
+  { id: 'CHOICE', level: 3, label: '任意', shortLabel: 'CHOICE' },
+  { id: 'GLOBAL', level: 4, label: '全体', shortLabel: 'GLOBAL' }
 ];
-const TARGET_LABELS = {
-  none: '対象なし',
-  self: '自分',
-  next: '次のプレイヤー',
-  all: '全員',
-  any: '任意のプレイヤー'
+const CONDITION_POWER = {
+  rank: 2,
+  jokerRank: 3,
+  suit: 2,
+  counts: { 1: 1, 2: 2, 3: 3, 4: 4 },
+  max: 4
 };
-const EFFECT_TARGETS = {
-  skip: ['next', 'any'],
-  bindSuit: ['self', 'next', 'all', 'any'],
-  reverse: ['none'],
-  clear: ['none'],
-  gift: ['next', 'any']
+const TARGETS = {
+  none: { id: 'none', label: '対象なし', connector: 'GLOBAL' },
+  self: { id: 'self', label: '自分', connector: 'SELF' },
+  next: { id: 'next', label: '次のプレイヤー', connector: 'NEXT' },
+  any: { id: 'any', label: '任意のプレイヤー', connector: 'CHOICE' },
+  all: { id: 'all', label: '全員', connector: 'GLOBAL' }
 };
+const EFFECT_CONFIGS = {
+  skip: {
+    label: 'スキップ',
+    connectors: ['SELF', 'NEXT', 'CHOICE'],
+    targets: ['self', 'next', 'any']
+  },
+  bindSuit: {
+    label: '縛り',
+    connectors: ['SELF', 'NEXT', 'CHOICE', 'GLOBAL'],
+    targets: ['self', 'next', 'any', 'all']
+  },
+  reverse: {
+    label: 'リバース',
+    connectors: ['GLOBAL'],
+    targets: ['none'],
+    fixedTarget: 'none',
+    fixedTargetLabel: '全体'
+  },
+  clear: {
+    label: '流す',
+    connectors: ['GLOBAL'],
+    targets: ['none'],
+    fixedTarget: 'none',
+    fixedTargetLabel: '場'
+  },
+  gift: {
+    label: '渡す',
+    connectors: ['NEXT', 'CHOICE'],
+    targets: ['next', 'any']
+  }
+};
+const EFFECTS = Object.entries(EFFECT_CONFIGS).map(([id, config]) => [id, config.label]);
+const TARGET_LABELS = Object.fromEntries(Object.entries(TARGETS).map(([id, target]) => [id, target.label]));
+const EFFECT_TARGETS = Object.fromEntries(
+  Object.entries(EFFECT_CONFIGS).map(([id, config]) => [id, config.targets])
+);
+const USER_TARGET_IDS = ['self', 'next', 'any', 'all'];
 
 let socket = null;
 let session = loadSession();
@@ -108,6 +144,23 @@ document.addEventListener('click', (event) => {
   }
   if (action === 'start') {
     emitAuthed('startGame', {});
+  }
+  if (action === 'set-rule-target') {
+    if (button.dataset.disabled === 'true') {
+      showMessage(button.dataset.reason || 'この対象は現在の条件では接続できません');
+      return;
+    }
+    ruleDraft.target = button.dataset.target;
+    render();
+  }
+  if (action === 'set-rule-effect') {
+    if (button.dataset.disabled === 'true') {
+      showMessage(button.dataset.reason || 'この効果は現在の条件・対象では接続できません');
+      return;
+    }
+    ruleDraft.effect = button.dataset.effect;
+    normalizeRuleDraftTarget(true);
+    render();
   }
   if (action === 'select-card') {
     toggleSelectedCard(button.dataset.cardId);
@@ -546,55 +599,181 @@ function renderHand() {
 
 function renderRuleBuilder() {
   normalizeRuleDraftTarget();
-  const targets = EFFECT_TARGETS[ruleDraft.effect] || ['none'];
-  const showTarget = !(targets.length === 1 && targets[0] === 'none');
+  const power = calculateConditionPower(ruleDraft.condition);
+  const target = getDraftTarget();
+  const selectedConnector = target?.connector || 'GLOBAL';
   const validation = validateRuleDraft();
 
   return `
-    <section class="panel">
+    <section class="panel rule-builder-panel">
       <h2>特殊ルール追加</h2>
-      <div class="form-grid">
-        <label>
-          数字
-          <select data-rule-field="rank">
-            <option value="">指定なし</option>
-            ${RANKS.map((rank) => option(rank, rank, ruleDraft.condition.rank)).join('')}
-          </select>
-        </label>
-        <label>
-          スート
-          <select data-rule-field="suit">
-            <option value="">指定なし</option>
-            ${SUITS.map(([id, symbol]) => option(id, symbol, ruleDraft.condition.suit)).join('')}
-          </select>
-        </label>
-        <label>
-          枚数
-          <select data-rule-field="count">
-            <option value="">指定なし</option>
-            ${[1, 2, 3, 4].map((count) => option(String(count), `${count}枚`, String(ruleDraft.condition.count))).join('')}
-          </select>
-        </label>
-        <label>
-          効果
-          <select data-rule-field="effect">
-            ${EFFECTS.map(([id, label]) => option(id, label, ruleDraft.effect)).join('')}
-          </select>
-        </label>
-        ${
-          showTarget
-            ? `<label>
-                対象
-                <select data-rule-field="target">
-                  ${targets.map((target) => option(target, TARGET_LABELS[target], ruleDraft.target)).join('')}
-                </select>
-              </label>`
-            : ''
-        }
+      <div class="puzzle-builder">
+        <section class="puzzle-piece condition-piece">
+          <div class="piece-heading">
+            <span>条件</span>
+            <strong>Power ${power}</strong>
+          </div>
+          <div class="form-grid compact-form">
+            <label>
+              数字
+              <select data-rule-field="rank">
+                <option value="">指定なし</option>
+                ${RANKS.map((rank) => option(rank, rank, ruleDraft.condition.rank)).join('')}
+              </select>
+            </label>
+            <label>
+              スート
+              <select data-rule-field="suit">
+                <option value="">指定なし</option>
+                ${SUITS.map(([id, symbol]) => option(id, symbol, ruleDraft.condition.suit)).join('')}
+              </select>
+            </label>
+            <label>
+              枚数
+              <select data-rule-field="count">
+                <option value="">指定なし</option>
+                ${[1, 2, 3, 4].map((count) => option(String(count), `${count}枚`, String(ruleDraft.condition.count))).join('')}
+              </select>
+            </label>
+          </div>
+          ${renderConditionSockets(power, selectedConnector)}
+        </section>
+        <div class="puzzle-arrow" aria-hidden="true">→</div>
+        <section class="puzzle-piece target-piece">
+          <div class="piece-heading">
+            <span>対象</span>
+            <strong>${escapeHtml(connectorLabel(selectedConnector))}</strong>
+          </div>
+          ${renderTargetChoices(power)}
+        </section>
+        <div class="puzzle-arrow" aria-hidden="true">→</div>
+        <section class="puzzle-piece effect-piece">
+          <div class="piece-heading">
+            <span>効果</span>
+            <strong>${escapeHtml(EFFECT_CONFIGS[ruleDraft.effect]?.label || '')}</strong>
+          </div>
+          ${renderEffectChoices(power)}
+        </section>
       </div>
-      <div class="rule-preview ${validation.ok ? '' : 'invalid'}">${escapeHtml(validation.message || previewRule())}</div>
+      <div class="rule-preview ${validation.ok ? '' : 'invalid'}">
+        <strong>${escapeHtml(validation.message || previewRule())}</strong>
+        <span>条件Power: ${power}</span>
+      </div>
       <button data-click="add-rule" type="button" ${validation.ok ? '' : 'disabled'}>追加</button>
     </section>
+  `;
+}
+
+function renderConditionSockets(power, selectedConnector) {
+  return `
+    <div class="connector-stack condition-sockets" aria-label="条件ピースの接続穴">
+      ${CONNECTORS.map((connector) => {
+        const open = connector.level <= power;
+        const active = open && connector.id === selectedConnector;
+        return `
+          <div class="connector-line ${open ? 'open' : 'locked'} ${active ? 'active' : ''}">
+            <span class="connector-level">${connector.level}</span>
+            <span class="socket-dot">${open ? '○' : '×'}</span>
+            <span>${escapeHtml(connector.shortLabel)}</span>
+          </div>
+        `;
+      }).join('')}
+    </div>
+  `;
+}
+
+function renderTargetChoices(power) {
+  const effectConfig = EFFECT_CONFIGS[ruleDraft.effect];
+  if (effectConfig?.fixedTarget) {
+    const targetId = effectConfig.fixedTarget;
+    const state = targetOptionState(targetId, power, effectConfig.fixedTargetLabel);
+    return `
+      <div class="piece-choice selected ${state.ok ? 'connected' : 'is-disabled'}">
+        ${renderTargetPeg(TARGETS[targetId].connector, state.ok)}
+        <span>
+          <strong>${escapeHtml(effectConfig.fixedTargetLabel)}</strong>
+          <small>${escapeHtml(state.ok ? 'GLOBALに接続中' : state.reason)}</small>
+        </span>
+      </div>
+    `;
+  }
+
+  return `
+    <div class="piece-choice-grid">
+      ${USER_TARGET_IDS.map((targetId) => {
+        const state = targetOptionState(targetId, power);
+        const selected = ruleDraft.target === targetId;
+        return `
+          <button
+            class="piece-choice ${selected ? 'selected' : ''} ${state.ok ? 'connected' : 'is-disabled'}"
+            data-click="set-rule-target"
+            data-target="${escapeAttr(targetId)}"
+            data-disabled="${state.ok ? 'false' : 'true'}"
+            data-reason="${escapeAttr(state.reason)}"
+            title="${escapeAttr(state.reason || `${TARGETS[targetId].label}に接続できます`)}"
+            type="button"
+          >
+            ${renderTargetPeg(TARGETS[targetId].connector, state.ok)}
+            <span>
+              <strong>${escapeHtml(TARGETS[targetId].label)}</strong>
+              <small>${escapeHtml(state.ok ? `${connectorLabel(TARGETS[targetId].connector)}に接続` : state.reason)}</small>
+            </span>
+          </button>
+        `;
+      }).join('')}
+    </div>
+  `;
+}
+
+function renderEffectChoices(power) {
+  return `
+    <div class="piece-choice-grid">
+      ${EFFECTS.map(([effectId, label]) => {
+        const state = effectOptionState(effectId, power);
+        const selected = ruleDraft.effect === effectId;
+        return `
+          <button
+            class="piece-choice effect-choice ${selected ? 'selected' : ''} ${state.ok ? 'connected' : 'is-disabled'}"
+            data-click="set-rule-effect"
+            data-effect="${escapeAttr(effectId)}"
+            data-disabled="${state.ok ? 'false' : 'true'}"
+            data-reason="${escapeAttr(state.reason)}"
+            title="${escapeAttr(state.reason || `${label}を接続できます`)}"
+            type="button"
+          >
+            ${renderEffectSockets(effectId, state.connector)}
+            <span>
+              <strong>${escapeHtml(label)}</strong>
+              <small>${escapeHtml(state.ok ? connectorSummary(effectId) : state.reason)}</small>
+            </span>
+          </button>
+        `;
+      }).join('')}
+    </div>
+  `;
+}
+
+function renderTargetPeg(connectorId, connected) {
+  return `
+    <span class="mini-connector peg-stack" aria-hidden="true">
+      ${CONNECTORS.map(
+        (connector) =>
+          `<span class="${connector.id === connectorId ? 'peg' : 'empty'} ${connected && connector.id === connectorId ? 'active' : ''}">${connector.id === connectorId ? '●' : '·'}</span>`
+      ).join('')}
+    </span>
+  `;
+}
+
+function renderEffectSockets(effectId, selectedConnector) {
+  const effectConfig = EFFECT_CONFIGS[effectId];
+  return `
+    <span class="mini-connector effect-sockets" aria-hidden="true">
+      ${CONNECTORS.map((connector) => {
+        const compatible = effectConfig.connectors.includes(connector.id);
+        const active = compatible && connector.id === selectedConnector;
+        return `<span class="${compatible ? 'socket' : 'empty'} ${active ? 'active' : ''}">${compatible ? '○' : '·'}</span>`;
+      }).join('')}
+    </span>
   `;
 }
 
@@ -649,17 +828,37 @@ function ownPlayer() {
   return roomState?.players.find((player) => player.isYou) || null;
 }
 
-function normalizeRuleDraftTarget() {
-  const targets = EFFECT_TARGETS[ruleDraft.effect] || ['none'];
+function normalizeRuleDraftTarget(preferUsable = false) {
+  const effectConfig = EFFECT_CONFIGS[ruleDraft.effect] || EFFECT_CONFIGS.skip;
+  if (effectConfig.fixedTarget) {
+    ruleDraft.target = effectConfig.fixedTarget;
+    return;
+  }
+
+  const targets = effectConfig.targets || ['self'];
   if (!targets.includes(ruleDraft.target)) {
     ruleDraft.target = targets[0];
   }
-  if (targets.length === 1 && targets[0] === 'none') {
-    ruleDraft.target = 'none';
+
+  if (preferUsable) {
+    const power = calculateConditionPower(ruleDraft.condition);
+    const currentState = targetOptionState(ruleDraft.target, power);
+    if (!currentState.ok) {
+      const usableTarget = targets.find((targetId) => targetOptionState(targetId, power).ok);
+      if (usableTarget) {
+        ruleDraft.target = usableTarget;
+      }
+    }
   }
 }
 
 function previewRule() {
+  const conditionText = previewCondition();
+  const effectText = previewEffect();
+  return `${conditionText}、${effectText}`;
+}
+
+function previewCondition() {
   const conditionParts = [];
   if (ruleDraft.condition.suit) {
     conditionParts.push(SUITS.find(([id]) => id === ruleDraft.condition.suit)?.[1] || '');
@@ -671,29 +870,184 @@ function previewRule() {
   let conditionText = conditionParts.join('');
   if (ruleDraft.condition.count) {
     conditionText = conditionText
-      ? `${conditionText}を含む${ruleDraft.condition.count}枚出し`
-      : `${ruleDraft.condition.count}枚出し`;
+      ? `${conditionText}を含む${ruleDraft.condition.count}枚出しをしたら`
+      : `${ruleDraft.condition.count}枚出しをしたら`;
   } else if (conditionText) {
-    conditionText = `${conditionText}を出した時`;
+    conditionText = `${conditionText}を出したら`;
   } else {
     conditionText = '条件を選んでください';
   }
 
-  const effect = EFFECTS.find(([id]) => id === ruleDraft.effect)?.[1] || '';
-  if (ruleDraft.target === 'none') {
-    return `${conditionText} → ${effect}`;
+  return conditionText;
+}
+
+function previewEffect() {
+  const effectConfig = EFFECT_CONFIGS[ruleDraft.effect];
+  const targetLabel = getDraftTargetLabel();
+  if (!effectConfig) return '効果を選んでください';
+
+  if (ruleDraft.effect === 'skip') {
+    return `${targetLabel}を1回スキップする`;
   }
-  return `${conditionText} → ${TARGET_LABELS[ruleDraft.target]} → ${effect}`;
+  if (ruleDraft.effect === 'bindSuit') {
+    return `${targetLabel}にスート縛りをかける`;
+  }
+  if (ruleDraft.effect === 'gift') {
+    return `${targetLabel}へカードを1枚渡す`;
+  }
+  if (ruleDraft.effect === 'reverse') {
+    return '進行方向を逆転する';
+  }
+  if (ruleDraft.effect === 'clear') {
+    return '場を流す';
+  }
+  return effectConfig.label;
 }
 
 function validateRuleDraft() {
   if (!ruleDraft.condition.rank && !ruleDraft.condition.suit && !ruleDraft.condition.count) {
     return { ok: false, message: '条件を1つ以上選んでください' };
   }
-  if (ruleDraft.effect === 'bindSuit' && !ruleDraft.condition.suit) {
-    return { ok: false, message: '縛りはスート条件を選んでください' };
+
+  const power = calculateConditionPower(ruleDraft.condition);
+  const targetState = targetOptionState(ruleDraft.target, power, getDraftTargetLabel());
+  if (!targetState.ok) {
+    return { ok: false, message: targetState.reason };
   }
+
+  const effectConfig = EFFECT_CONFIGS[ruleDraft.effect];
+  const connector = targetConnector(ruleDraft.target);
+  if (!effectConfig.connectors.includes(connector)) {
+    return {
+      ok: false,
+      message: `『${effectConfig.label}』は${getDraftTargetLabel()}を対象にできません`
+    };
+  }
+
   return { ok: true, message: '' };
+}
+
+function calculateConditionPower(condition) {
+  let power = 0;
+  if (condition.rank) {
+    power += condition.rank === 'JOKER' ? CONDITION_POWER.jokerRank : CONDITION_POWER.rank;
+  }
+  if (condition.suit) {
+    power += CONDITION_POWER.suit;
+  }
+  if (condition.count) {
+    power += CONDITION_POWER.counts[Number(condition.count)] || 0;
+  }
+  return Math.min(CONDITION_POWER.max, power);
+}
+
+function getDraftTarget() {
+  return TARGETS[ruleDraft.target] || TARGETS.none;
+}
+
+function getDraftTargetLabel() {
+  const effectConfig = EFFECT_CONFIGS[ruleDraft.effect];
+  if (effectConfig?.fixedTargetLabel) {
+    return effectConfig.fixedTargetLabel;
+  }
+  return getDraftTarget().label;
+}
+
+function targetConnector(targetId) {
+  return TARGETS[targetId]?.connector || 'GLOBAL';
+}
+
+function connectorLevel(connectorId) {
+  return CONNECTORS.find((connector) => connector.id === connectorId)?.level || 4;
+}
+
+function connectorLabel(connectorId) {
+  const connector = CONNECTORS.find((candidate) => candidate.id === connectorId);
+  return connector ? `${connector.level} ${connector.shortLabel}` : connectorId;
+}
+
+function connectorSummary(effectId) {
+  const effectConfig = EFFECT_CONFIGS[effectId];
+  return effectConfig.connectors.map(connectorLabel).join(' / ');
+}
+
+function targetOptionState(targetId, power, displayLabel) {
+  const target = TARGETS[targetId];
+  const effectConfig = EFFECT_CONFIGS[ruleDraft.effect];
+  if (!target || !effectConfig) {
+    return { ok: false, reason: '対象または効果が不正です' };
+  }
+
+  const label = displayLabel || target.label;
+  const connector = target.connector;
+  const level = connectorLevel(connector);
+  if (power < level) {
+    return {
+      ok: false,
+      reason: `現在の条件Powerは${power}です。${label}を対象にするには${level}以上必要です。`
+    };
+  }
+
+  if (!effectConfig.targets.includes(targetId) || !effectConfig.connectors.includes(connector)) {
+    return {
+      ok: false,
+      reason: `『${effectConfig.label}』は${label}を対象にできません。`
+    };
+  }
+
+  return { ok: true, reason: '' };
+}
+
+function effectOptionState(effectId, power) {
+  const effectConfig = EFFECT_CONFIGS[effectId];
+  if (!effectConfig) {
+    return { ok: false, reason: '効果が不正です', connector: 'SELF' };
+  }
+
+  if (effectConfig.fixedTarget) {
+    const connector = targetConnector(effectConfig.fixedTarget);
+    const level = connectorLevel(connector);
+    if (power < level) {
+      return {
+        ok: false,
+        reason: `『${effectConfig.label}』は${connectorLabel(connector)}属性が必要です。条件Powerを${level}以上にしてください。`,
+        connector
+      };
+    }
+    return { ok: true, reason: '', connector };
+  }
+
+  const currentConnector = targetConnector(ruleDraft.target);
+  if (ruleDraft.target !== 'none' && !effectConfig.targets.includes(ruleDraft.target)) {
+    return {
+      ok: false,
+      reason: `『${effectConfig.label}』は${getDraftTargetLabel()}を対象にできません。`,
+      connector: currentConnector
+    };
+  }
+
+  if (
+    effectConfig.targets.includes(ruleDraft.target) &&
+    effectConfig.connectors.includes(currentConnector) &&
+    power >= connectorLevel(currentConnector)
+  ) {
+    return { ok: true, reason: '', connector: currentConnector };
+  }
+
+  const usableTarget = effectConfig.targets.find((targetId) => {
+    const connector = targetConnector(targetId);
+    return effectConfig.connectors.includes(connector) && power >= connectorLevel(connector);
+  });
+  if (usableTarget) {
+    return { ok: true, reason: '', connector: targetConnector(usableTarget) };
+  }
+
+  const minLevel = Math.min(...effectConfig.connectors.map(connectorLevel));
+  return {
+    ok: false,
+    reason: `『${effectConfig.label}』を使うには条件Power ${minLevel}以上が必要です。`,
+    connector: effectConfig.connectors[0]
+  };
 }
 
 function pendingLabel(pending) {

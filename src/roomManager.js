@@ -1,7 +1,7 @@
 const crypto = require('crypto');
 const { MODES, SUIT_SYMBOLS } = require('./constants');
 const { makeId, makeReconnectToken, publicCard, sortHand } = require('./cardUtils');
-const { describeRule, validTargetsForEffect } = require('./ruleEngine');
+const { calculateConditionPower, describeRule, targetConnector, validTargetsForEffect } = require('./ruleEngine');
 const {
   addEvent,
   addRule,
@@ -173,7 +173,9 @@ function createRoomManager() {
         revealed: rule.revealed,
         generated: rule.generated,
         condition: rule.secret && !rule.revealed ? null : rule.condition,
+        conditionPower: rule.secret && !rule.revealed ? null : calculateConditionPower(rule.condition),
         target: rule.secret && !rule.revealed ? null : rule.target,
+        targetConnector: rule.secret && !rule.revealed ? null : targetConnector(rule.target),
         effect: rule.secret && !rule.revealed ? null : rule.effect,
         description: describeRule(rule)
       })),

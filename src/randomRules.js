@@ -48,11 +48,16 @@ function generateRandomRules(count, options = {}) {
     const effect = randomItem(effects, rng);
     const targets = EFFECTS[effect].targets;
     const target = randomItem(targets, rng);
-    const candidate = normalizeRuleInput({
-      condition: buildCondition(effect, rng),
-      effect,
-      target
-    });
+    let candidate;
+    try {
+      candidate = normalizeRuleInput({
+        condition: buildCondition(effect, rng),
+        effect,
+        target
+      });
+    } catch (_error) {
+      continue;
+    }
     const signature = ruleSignature(candidate);
 
     if (seen.has(signature)) {

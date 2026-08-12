@@ -282,6 +282,7 @@ function analyzePlay(room, player, cardIds) {
       ruleSuits.add(suit.id);
     }
   }
+  const playedSuits = new Set(nonJokers.map((card) => card.suit));
 
   return {
     cards,
@@ -291,8 +292,18 @@ function analyzePlay(room, player, cardIds) {
     hasJoker,
     ruleRanks,
     ruleSuits,
+    playedSuits,
     playedCardLabels: cards.map((card) => card.id)
   };
+}
+
+function bindingSuitForRule(rule, play) {
+  if (rule.condition.suit) {
+    return rule.condition.suit;
+  }
+
+  const playedSuit = SUITS.find((suit) => play.playedSuits.has(suit.id));
+  return playedSuit?.id || SUITS[0].id;
 }
 
 function cardsContainSuit(cards, suit) {
@@ -356,7 +367,7 @@ function playCards(room, playerId, cardIds) {
       effect: rule.effect,
       target: rule.target,
       condition: rule.condition,
-      requiredSuit: rule.effect === 'bindSuit' ? rule.condition.suit : null,
+      requiredSuit: rule.effect === 'bindSuit' ? bindingSuitForRule(rule, play) : null,
       selectedTargetIds: null
     });
   }

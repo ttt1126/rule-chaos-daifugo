@@ -1,4 +1,6 @@
 const {
+  CONDITION_POWER,
+  CONNECTORS,
   EFFECTS,
   RANKS,
   SUITS,
@@ -13,6 +15,13 @@ const VALID_COUNTS = new Set([1, 2, 3, 4]);
 
 function normalizeNullable(value) {
   if (value === undefined || value === null || value === '' || value === 'none') {
+    return null;
+  }
+  return value;
+}
+
+function normalizeTarget(value) {
+  if (value === undefined || value === null || value === '') {
     return null;
   }
   return value;
@@ -43,23 +52,88 @@ function normalizeRuleInput(input) {
     throw new Error('少なくとも1つの条件を指定してください');
   }
 
-  let target = normalizeNullable(input?.target) || effectConfig.targets[0];
+  let target = normalizeTarget(input?.target) || effectConfig.targets[0];
   if (effectConfig.targets.length === 1 && effectConfig.targets[0] === 'none') {
     target = 'none';
   }
-  if (!effectConfig.targets.includes(target)) {
-    throw new Error('この効果では選べない対象です');
-  }
-
-  if (effect === 'bindSuit' && suit === null) {
-    throw new Error('縛り効果はスート条件を指定してください');
-  }
-
-  return {
+  const normalized = {
     condition: { rank, suit, count },
     target,
     effect
   };
+
+  validateRuleBalance(normalized);
+  return normalized;
+}
+
+function validateRuleBalance(rule) {
+  const power = calculateConditionPower(rule.condition);
+  const target = TARGETS[rule.target];
+  const effect = EFFECTS[rule.effect];
+
+  if (!target) {
+    throw new Error('存在しない対象です');
+  }
+  if (!effect) {
+    throw new Error('存在しない効果です');
+  }
+
+  const targetConnector = target.connector;
+  const targetLevel = CONNECTORS[targetConnector]?.level;
+  if (!targetLevel) {
+    throw new Error('対象の接続属性が不正です');
+  }
+
+  if (power < targetLevel) {
+    throw new Error(
+      `現在の条件パワーは${power}です。${target.label}を対象にするには${targetLevel}以上必要です`
+    );
+  }
+
+  if (!effect.targets.includes(rule.target) || !effect.connectors.includes(targetConnector)) {
+    throw new Error(`「${effect.label}」は${target.label}を対象にできません`);
+  }
+}
+
+function calculateConditionPower(condition = {}) {
+  let power = 0;
+  const rank = normalizeNullable(condition.rank);
+  const suit = normalizeNullable(condition.suit);
+  const rawCount = normalizeNullable(condition.count);
+  const count = rawCount === null ? null : Number(rawCount);
+
+  if (rank) {
+    power += rank === 'JOKER' ? CONDITION_POWER.jokerRank : CONDITION_POWER.rank;
+  }
+  if (suit) {
+    power += CONDITION_POWER.suit;
+  }
+  if (count !== null) {
+    power += CONDITION_POWER.counts[count] || 0;
+  }
+
+  return Math.min(CONDITION_POWER.max, power);
+}
+
+function targetConnector(target) {
+  return TARGETS[target]?.connector || null;
+}
+
+function conditionUnlocksTarget(condition, target) {
+  const connector = targetConnector(target);
+  if (!connector) return false;
+  return calculateConditionPower(condition) >= CONNECTORS[connector].level;
+}
+
+function effectSupportsTarget(effect, target) {
+  const effectConfig = EFFECTS[effect];
+  const connector = targetConnector(target);
+  return Boolean(
+    effectConfig &&
+      connector &&
+      effectConfig.targets.includes(target) &&
+      effectConfig.connectors.includes(connector)
+  );
 }
 
 function conditionMatchesPlay(condition, play) {
@@ -152,15 +226,25 @@ function validTargetsForEffect(effect) {
   return EFFECTS[effect]?.targets || [];
 }
 
+function validConnectorsForEffect(effect) {
+  return EFFECTS[effect]?.connectors || [];
+}
+
 module.exports = {
+  calculateConditionPower,
+  conditionUnlocksTarget,
   describeCondition,
   describeEffect,
   describeRule,
   describeSuit,
   describeTarget,
+  effectSupportsTarget,
   getTriggeredRules,
   normalizeRuleInput,
   orderTriggeredRules,
   ruleSignature,
+  targetConnector,
+  validateRuleBalance,
+  validConnectorsForEffect,
   validTargetsForEffect
 };
