@@ -382,13 +382,13 @@ function renderLobby() {
       <strong>待機中</strong>
       <span>${roomState.players.length}/4人参加中</span>
     </section>
+    ${renderRuleBuilder()}
     <section class="content-grid">
       <div class="main-column">
         ${renderPlayers()}
         ${roomState.isHost ? renderHostSettings() : '<section class="panel"><h2>ホストの開始待ちです</h2></section>'}
       </div>
       <aside class="side-column">
-        ${renderRuleBuilder()}
         ${renderRules()}
         ${renderEvents()}
       </aside>
@@ -399,6 +399,7 @@ function renderLobby() {
 function renderGame() {
   return `
     ${renderTurnBanner()}
+    ${roomState.isHost && roomState.status === 'playing' ? renderRuleBuilder() : ''}
     <section class="content-grid">
       <div class="main-column">
         ${renderTable()}
@@ -407,7 +408,6 @@ function renderGame() {
       </div>
       <aside class="side-column">
         ${renderPlayers()}
-        ${roomState.isHost && roomState.status === 'playing' ? renderRuleBuilder() : ''}
         ${renderRules()}
         ${renderEvents()}
       </aside>
@@ -692,7 +692,7 @@ function renderTargetChoices(power) {
         ${renderTargetPeg(TARGETS[targetId].connector, state.ok)}
         <span>
           <strong>${escapeHtml(effectConfig.fixedTargetLabel)}</strong>
-          <small>${escapeHtml(state.ok ? 'GLOBALに接続中' : state.reason)}</small>
+          <small>${escapeHtml(state.ok ? 'GLOBALに接続中' : state.shortReason)}</small>
         </span>
       </div>
     `;
@@ -716,7 +716,7 @@ function renderTargetChoices(power) {
             ${renderTargetPeg(TARGETS[targetId].connector, state.ok)}
             <span>
               <strong>${escapeHtml(TARGETS[targetId].label)}</strong>
-              <small>${escapeHtml(state.ok ? `${connectorLabel(TARGETS[targetId].connector)}に接続` : state.reason)}</small>
+              <small>${escapeHtml(state.ok ? `${connectorLabel(TARGETS[targetId].connector)}に接続` : state.shortReason)}</small>
             </span>
           </button>
         `;
@@ -744,7 +744,7 @@ function renderEffectChoices(power) {
             ${renderEffectSockets(effectId, state.connector)}
             <span>
               <strong>${escapeHtml(label)}</strong>
-              <small>${escapeHtml(state.ok ? connectorSummary(effectId) : state.reason)}</small>
+              <small>${escapeHtml(state.ok ? connectorSummary(effectId) : state.shortReason)}</small>
             </span>
           </button>
         `;
@@ -975,7 +975,7 @@ function targetOptionState(targetId, power, displayLabel) {
   const target = TARGETS[targetId];
   const effectConfig = EFFECT_CONFIGS[ruleDraft.effect];
   if (!target || !effectConfig) {
-    return { ok: false, reason: '対象または効果が不正です' };
+    return { ok: false, reason: '対象または効果が不正です', shortReason: '不正' };
   }
 
   const label = displayLabel || target.label;
@@ -984,14 +984,16 @@ function targetOptionState(targetId, power, displayLabel) {
   if (power < level) {
     return {
       ok: false,
-      reason: `現在の条件Powerは${power}です。${label}を対象にするには${level}以上必要です。`
+      reason: `現在の条件Powerは${power}です。${label}を対象にするには${level}以上必要です。`,
+      shortReason: `Power ${level}必要`
     };
   }
 
   if (!effectConfig.targets.includes(targetId) || !effectConfig.connectors.includes(connector)) {
     return {
       ok: false,
-      reason: `『${effectConfig.label}』は${label}を対象にできません。`
+      reason: `『${effectConfig.label}』は${label}を対象にできません。`,
+      shortReason: '効果と非対応'
     };
   }
 
@@ -1001,7 +1003,7 @@ function targetOptionState(targetId, power, displayLabel) {
 function effectOptionState(effectId, power) {
   const effectConfig = EFFECT_CONFIGS[effectId];
   if (!effectConfig) {
-    return { ok: false, reason: '効果が不正です', connector: 'SELF' };
+    return { ok: false, reason: '効果が不正です', shortReason: '不正', connector: 'SELF' };
   }
 
   if (effectConfig.fixedTarget) {
@@ -1011,6 +1013,7 @@ function effectOptionState(effectId, power) {
       return {
         ok: false,
         reason: `『${effectConfig.label}』は${connectorLabel(connector)}属性が必要です。条件Powerを${level}以上にしてください。`,
+        shortReason: `Power ${level}必要`,
         connector
       };
     }
@@ -1022,6 +1025,7 @@ function effectOptionState(effectId, power) {
     return {
       ok: false,
       reason: `『${effectConfig.label}』は${getDraftTargetLabel()}を対象にできません。`,
+      shortReason: '対象と非対応',
       connector: currentConnector
     };
   }
@@ -1046,6 +1050,7 @@ function effectOptionState(effectId, power) {
   return {
     ok: false,
     reason: `『${effectConfig.label}』を使うには条件Power ${minLevel}以上が必要です。`,
+    shortReason: `Power ${minLevel}必要`,
     connector: effectConfig.connectors[0]
   };
 }

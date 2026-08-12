@@ -414,14 +414,15 @@ form,
 }
 
 .rule-builder-panel {
+  margin-bottom: 14px;
   overflow: hidden;
 }
 
 .puzzle-builder {
   display: grid;
-  grid-template-columns: minmax(0, 1.1fr) auto minmax(0, 1fr) auto minmax(0, 1fr);
+  grid-template-columns: minmax(250px, 1fr) 24px minmax(260px, 1fr) 24px minmax(300px, 1.15fr);
   align-items: stretch;
-  gap: 8px;
+  gap: 10px;
 }
 
 .puzzle-piece {
@@ -470,6 +471,7 @@ form,
 }
 
 .compact-form {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 8px;
 }
 
@@ -492,6 +494,10 @@ form,
 .connector-stack {
   display: grid;
   gap: 5px;
+}
+
+.condition-sockets {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
 }
 
 .connector-line {
@@ -535,6 +541,7 @@ form,
 
 .piece-choice-grid {
   display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 8px;
 }
 
@@ -554,7 +561,8 @@ form,
 .piece-choice strong,
 .piece-choice small {
   display: block;
-  overflow-wrap: anywhere;
+  overflow-wrap: break-word;
+  word-break: keep-all;
 }
 
 .piece-choice small {
@@ -664,5 +672,11 @@ form,
   .puzzle-arrow {
     min-height: 20px;
     transform: rotate(90deg);
+  }
+
+  .compact-form,
+  .condition-sockets,
+  .piece-choice-grid {
+    grid-template-columns: 1fr;
   }
 }
