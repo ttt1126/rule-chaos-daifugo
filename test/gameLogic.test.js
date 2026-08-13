@@ -6,6 +6,7 @@ const {
   beginRuleBuilding,
   chooseTarget,
   chooseTransferCard,
+  getTurnAvailability,
   leavePlayer,
   passTurn,
   playCards,
@@ -63,6 +64,8 @@ function makeRoom(hands) {
       effectQueue: [],
       resolvingActorId: null,
       forceLeadPlayerId: null,
+      emptyTablePasses: [],
+      emptyTableFirstPasserId: null,
       turnNumber: 1
     }
   };
@@ -371,6 +374,155 @@ test('複数縛りはAND条件として扱う', () => {
   assert.throws(() => playCards(room, 'p2', ['c']), /スート縛り/);
   assert.throws(() => playCards(room, 'p2', ['d']), /数字縛り/);
   playCards(room, 'p2', ['e']);
+});
+
+test('場が空でスート縛りの合法手がない場合はパスできる', () => {
+  const room = makeRoom({
+    p1: [card('a', '4', 'H'), card('b', '5', 'D')],
+    p2: [card('c', '6', 'S')]
+  });
+  const p1 = room.players.find((player) => player.id === 'p1');
+  p1.bindings = [{ type: 'suit', suits: ['S'] }];
+  p1.bindingSuit = 'S';
+
+  const availability = getTurnAvailability(room, 'p1');
+  assert.equal(availability.canPass, true);
+  assert.equal(availability.noLegalPlay, true);
+
+  passTurn(room, 'p1');
+
+  assert.equal(room.game.table, null);
+  assert.equal(room.game.currentPlayerId, 'p2');
+  assert.equal(p1.bindings.length, 0);
+  assert.equal(p1.bindingSuit, null);
+  assert.match(room.events.map((event) => event.text).join('\n'), /出せるカードがありません/);
+});
+
+test('場が空で数字縛り・階段縛りの合法手がない場合もパスできる', () => {
+  const rankRoom = makeRoom({
+    p1: [card('a', '4', 'H')],
+    p2: [card('b', '5', 'S')]
+  });
+  rankRoom.players.find((player) => player.id === 'p1').bindings = [{ type: 'rank', ranks: ['8'] }];
+  passTurn(rankRoom, 'p1');
+  assert.equal(rankRoom.players.find((player) => player.id === 'p1').bindings.length, 0);
+  assert.equal(rankRoom.game.currentPlayerId, 'p2');
+
+  const stepRoom = makeRoom({
+    p1: [card('c', '4', 'H')],
+    p2: [card('d', '5', 'S')]
+  });
+  stepRoom.players.find((player) => player.id === 'p1').bindings = [{ type: 'step', ranks: ['8'] }];
+  passTurn(stepRoom, 'p1');
+  assert.equal(stepRoom.players.find((player) => player.id === 'p1').bindings.length, 0);
+  assert.equal(stepRoom.game.currentPlayerId, 'p2');
+});
+
+test('場がある状態で縛りにより合法手がなくてもパスで縛りが解除される', () => {
+  const room = makeRoom({
+    p1: [card('a', '7', 'S'), card('b', '9', 'S')],
+    p2: [card('c', '8', 'H'), card('d', '10', 'H')]
+  });
+
+  playCards(room, 'p1', ['a']);
+  const p2 = room.players.find((player) => player.id === 'p2');
+  p2.bindings = [{ type: 'suit', suits: ['S'] }];
+
+  assert.equal(getTurnAvailability(room, 'p2').noLegalPlay, true);
+  passTurn(room, 'p2');
+
+  assert.equal(p2.bindings.length, 0);
+  assert.equal(room.game.table, null);
+  assert.equal(room.game.currentPlayerId, 'p1');
+});
+
+test('複数縛りでAND条件を満たす合法手がなくてもパスですべて解除される', () => {
+  const room = makeRoom({
+    p1: [card('a', '7', 'S'), card('b', '8', 'H')],
+    p2: [card('c', '9', 'C')]
+  });
+  const p1 = room.players.find((player) => player.id === 'p1');
+  p1.bindings = [
+    { type: 'suit', suits: ['S'] },
+    { type: 'rank', ranks: ['8'] }
+  ];
+
+  assert.equal(getTurnAvailability(room, 'p1').noLegalPlay, true);
+  passTurn(room, 'p1');
+
+  assert.equal(p1.bindings.length, 0);
+  assert.equal(room.game.currentPlayerId, 'p2');
+});
+
+test('場が空で縛りの合法手がある場合も任意パスで縛りを解除できる', () => {
+  const room = makeRoom({
+    p1: [card('a', '7', 'S'), card('b', '8', 'H')],
+    p2: [card('c', '9', 'C')]
+  });
+  const p1 = room.players.find((player) => player.id === 'p1');
+  p1.bindings = [{ type: 'suit', suits: ['S'] }];
+
+  const availability = getTurnAvailability(room, 'p1');
+  assert.equal(availability.canPass, true);
+  assert.equal(availability.noLegalPlay, false);
+
+  passTurn(room, 'p1');
+
+  assert.equal(p1.bindings.length, 0);
+  assert.equal(room.game.currentPlayerId, 'p2');
+});
+
+test('スキップでは縛りを消費せず、次の実行動機会まで維持する', () => {
+  const room = makeRoom({
+    p1: [card('a', '7', 'S'), card('b', '9', 'S')],
+    p2: [card('c', '8', 'S')],
+    p3: [card('d', '10', 'H')]
+  });
+  const p2 = room.players.find((player) => player.id === 'p2');
+  p2.bindings = [{ type: 'suit', suits: ['S'] }];
+  p2.skipTurns = 1;
+
+  playCards(room, 'p1', ['a']);
+
+  assert.equal(room.game.currentPlayerId, 'p3');
+  assert.equal(p2.skipTurns, 0);
+  assert.equal(p2.bindings.length, 1);
+});
+
+test('空の場で縛りによる連続パス後、合法手のある次プレイヤーが場を開始できる', () => {
+  const room = makeRoom({
+    p1: [card('a', '4', 'H')],
+    p2: [card('b', '5', 'D')],
+    p3: [card('c', '6', 'S')]
+  });
+  room.players.find((player) => player.id === 'p1').bindings = [{ type: 'suit', suits: ['S'] }];
+  room.players.find((player) => player.id === 'p2').bindings = [{ type: 'rank', ranks: ['8'] }];
+
+  passTurn(room, 'p1');
+  passTurn(room, 'p2');
+
+  assert.equal(room.game.table, null);
+  assert.equal(room.game.currentPlayerId, 'p3');
+  playCards(room, 'p3', ['c']);
+  assert.equal(room.game.table.rank, '6');
+});
+
+test('空の場で全員が縛りによりパスした場合は縛りを解除して最初のパス者に戻す', () => {
+  const room = makeRoom({
+    p1: [card('a', '4', 'H')],
+    p2: [card('b', '5', 'D')]
+  });
+  room.players.find((player) => player.id === 'p1').bindings = [{ type: 'suit', suits: ['S'] }];
+  room.players.find((player) => player.id === 'p2').bindings = [{ type: 'rank', ranks: ['8'] }];
+
+  passTurn(room, 'p1');
+  passTurn(room, 'p2');
+
+  assert.equal(room.game.table, null);
+  assert.equal(room.game.currentPlayerId, 'p1');
+  assert.equal(room.players.find((player) => player.id === 'p1').bindings.length, 0);
+  assert.equal(room.players.find((player) => player.id === 'p2').bindings.length, 0);
+  assert.match(room.events.map((event) => event.text).join('\n'), /縛りなしで新しい場を開始/);
 });
 
 test('渡すは対象決定後にサーバー上の手札を移動する', () => {

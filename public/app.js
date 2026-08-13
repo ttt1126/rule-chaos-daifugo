@@ -681,7 +681,15 @@ function renderTurnBanner() {
     )}</span></section>`;
   }
   if (game.isYourTurn) {
-    return `<section class="status-banner your-turn"><strong>あなたのターンです</strong><span>${escapeHtml(roundLabel)} / カードを選んで出すか、パスできます</span></section>`;
+    const availability = game.turnAvailability || {};
+    const actionText = availability.noLegalPlay
+      ? availability.passReason || '出せるカードがありません'
+      : availability.canPass
+        ? 'カードを選んで出すか、パスできます'
+        : '場を開始するカードを出してください';
+    return `<section class="status-banner your-turn"><strong>${availability.noLegalPlay ? '出せるカードがありません' : 'あなたのターンです'}</strong><span>${escapeHtml(
+      `${roundLabel} / ${actionText}`
+    )}</span></section>`;
   }
   return `<section class="status-banner"><strong>${escapeHtml(
     game.currentPlayerName || ''
@@ -822,8 +830,10 @@ function renderHand() {
   const player = ownPlayer();
   const hand = player?.hand || [];
   const game = roomState.game;
+  const availability = game?.turnAvailability || {};
   const disabled =
     player?.left || !game?.isYourTurn || game?.paused || Boolean(game?.pendingAction) || roomState.status !== 'playing';
+  const cardsDisabled = disabled || Boolean(game?.isYourTurn && availability.noLegalPlay);
 
   return `
     <section class="hand-area">
@@ -831,23 +841,51 @@ function renderHand() {
         <h2>手札</h2>
         <span>${selectedCardIds.size}枚選択中</span>
       </div>
+      ${renderTurnConstraintNotice(availability)}
       <div class="hand-grid">
         ${hand
           .map((card) => {
             const selected = selectedCardIds.has(card.id) ? ' selected' : '';
             return `<button class="card-button ${cardClass(card)}${selected}" data-click="select-card" data-card-id="${escapeAttr(
               card.id
-            )}" type="button" ${disabled ? 'disabled' : ''}>${escapeHtml(card.label)}</button>`;
+            )}" type="button" ${cardsDisabled ? 'disabled' : ''}>${escapeHtml(card.label)}</button>`;
           })
           .join('')}
       </div>
       <div class="action-bar">
-        <button class="primary" data-click="play" type="button" ${disabled || selectedCardIds.size === 0 ? 'disabled' : ''}>
+        <button class="primary" data-click="play" type="button" ${
+          disabled || availability.noLegalPlay || selectedCardIds.size === 0 ? 'disabled' : ''
+        }>
           出す
         </button>
-        <button data-click="pass" type="button" ${disabled || !game?.table ? 'disabled' : ''}>パス</button>
+        <button data-click="pass" type="button" ${disabled || !availability.canPass ? 'disabled' : ''}>パス</button>
       </div>
     </section>
+  `;
+}
+
+function renderTurnConstraintNotice(availability) {
+  if (!roomState.game?.isYourTurn) return '';
+
+  const labels = availability.bindingLabels || [];
+  const shouldExplainEmptyPass = availability.tableIsEmpty && availability.canPass && labels.length > 0;
+  if (!availability.noLegalPlay && !shouldExplainEmptyPass) return '';
+
+  const title = availability.noLegalPlay ? '出せるカードがありません' : '縛りをパスで解除できます';
+  const reason =
+    availability.passReason ||
+    (labels.length > 0 ? '縛り条件を満たす手がありません' : '場に出せる手がありません');
+
+  return `
+    <div class="turn-constraint-notice">
+      <strong>${escapeHtml(title)}</strong>
+      <span>${escapeHtml(reason)}</span>
+      ${
+        labels.length > 0
+          ? `<ul>${labels.map((label) => `<li>${escapeHtml(label)}</li>`).join('')}</ul>`
+          : ''
+      }
+    </div>
   `;
 }
 

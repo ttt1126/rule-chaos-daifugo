@@ -267,6 +267,8 @@ function startRound(room, options = {}) {
     effectQueue: [],
     resolvingActorId: null,
     forceLeadPlayerId: null,
+    emptyTablePasses: [],
+    emptyTableFirstPasserId: null,
     turnNumber: 1
   };
   room.match.ruleBuilding = null;
@@ -354,6 +356,7 @@ function clearRoundState(room) {
   room.game.effectQueue = [];
   room.game.resolvingActorId = null;
   room.game.forceLeadPlayerId = null;
+  resetEmptyTablePasses(room.game);
 }
 
 function finishMatch(room) {
@@ -596,6 +599,98 @@ function hasActiveBindings(player) {
   return activeBindings(player).length > 0;
 }
 
+function cardIdCombinations(cards, count) {
+  const results = [];
+
+  function visit(startIndex, selected) {
+    if (selected.length === count) {
+      results.push([...selected]);
+      return;
+    }
+    for (let index = startIndex; index < cards.length; index += 1) {
+      selected.push(cards[index].id);
+      visit(index + 1, selected);
+      selected.pop();
+    }
+  }
+
+  visit(0, []);
+  return results;
+}
+
+function findFirstLegalPlay(room, player) {
+  if (!room.game || player.left || player.finishedRank || player.hand.length === 0) {
+    return null;
+  }
+
+  const counts = room.game.table
+    ? [room.game.table.count]
+    : [1, 2, 3, 4].filter((count) => count <= player.hand.length);
+
+  for (const count of counts) {
+    for (const cardIds of cardIdCombinations(player.hand, count)) {
+      try {
+        analyzePlay(room, player, cardIds);
+        return cardIds;
+      } catch (_error) {
+        // Try the next combination; analyzePlay is the single source of truth.
+      }
+    }
+  }
+
+  return null;
+}
+
+function hasLegalPlay(room, player) {
+  return Boolean(findFirstLegalPlay(room, player));
+}
+
+function getTurnAvailability(room, playerId) {
+  const player = getPlayer(room, playerId);
+  const bindings = player ? activeBindings(player) : [];
+  const isCurrentTurn =
+    room.status === 'playing' &&
+    room.game?.phase === 'playing' &&
+    room.game.currentPlayerId === playerId &&
+    player &&
+    !player.left &&
+    !player.finishedRank;
+
+  if (!isCurrentTurn || isGamePaused(room)) {
+    return {
+      canPass: false,
+      hasLegalPlay: false,
+      noLegalPlay: false,
+      tableIsEmpty: !room.game?.table,
+      passReason: '',
+      bindingLabels: bindings.map(bindingLabel)
+    };
+  }
+
+  const firstLegalPlay = findFirstLegalPlay(room, player);
+  const tableIsEmpty = !room.game.table;
+  const canPass = Boolean(room.game.table || bindings.length > 0);
+  const noLegalPlay = !firstLegalPlay;
+  let passReason = '';
+
+  if (tableIsEmpty && bindings.length > 0) {
+    passReason = noLegalPlay
+      ? '縛りにより出せるカードがないため、場が空でもパスできます'
+      : '縛りをパスで解除できます';
+  } else if (!tableIsEmpty && noLegalPlay) {
+    passReason = '出せるカードがないため、パスできます';
+  }
+
+  return {
+    canPass,
+    hasLegalPlay: Boolean(firstLegalPlay),
+    noLegalPlay,
+    tableIsEmpty,
+    passReason,
+    bindingLabels: bindings.map(bindingLabel)
+  };
+}
+
 function validateBindingsForPlay(player, cards, effectiveRank) {
   for (const binding of activeBindings(player)) {
     if (binding.type === 'suit' && !cardsContainAnySuit(cards, binding.suits || [])) {
@@ -610,6 +705,14 @@ function validateBindingsForPlay(player, cards, effectiveRank) {
 function clearBindingsAfterAction(player) {
   player.bindings = [];
   player.bindingSuit = null;
+}
+
+function clearBindingsAfterActionWithEvent(room, player) {
+  if (!hasActiveBindings(player)) {
+    return;
+  }
+  clearBindingsAfterAction(player);
+  addEvent(room, `${player.name}さんの縛りが解除されました`, 'rule');
 }
 
 function bindingSuitsLabel(suits = []) {
@@ -631,6 +734,69 @@ function bindingLabel(binding) {
     return `階段縛り: ${bindingRanksLabel(binding.ranks)}`;
   }
   return '縛り';
+}
+
+function bindingListLabel(bindings) {
+  return bindings.map(bindingLabel).join('、') || '縛り';
+}
+
+function logNoLegalPlayIfBound(room, player) {
+  const bindings = activeBindings(player);
+  if (bindings.length > 0 && !hasLegalPlay(room, player)) {
+    addEvent(room, `${player.name}さんは${bindingListLabel(bindings)}により出せるカードがありません`, 'rule');
+  }
+}
+
+function resetEmptyTablePasses(game) {
+  if (!game) return;
+  game.emptyTablePasses = [];
+  game.emptyTableFirstPasserId = null;
+}
+
+function recordEmptyTablePass(room, playerId) {
+  const game = room.game;
+  if (!Array.isArray(game.emptyTablePasses)) {
+    game.emptyTablePasses = [];
+  }
+  if (!game.emptyTableFirstPasserId) {
+    game.emptyTableFirstPasserId = playerId;
+  }
+  game.emptyTablePasses = [...new Set([...game.emptyTablePasses, playerId])];
+}
+
+function allActivePlayersPassedEmptyTable(room) {
+  const passed = new Set(room.game.emptyTablePasses || []);
+  const active = activePlayers(room);
+  return active.length > 0 && active.every((player) => passed.has(player.id));
+}
+
+function recoverFromEmptyTablePassLoop(room) {
+  const game = room.game;
+  const leadBaseId = game.emptyTableFirstPasserId || game.currentPlayerId;
+  let clearedBindings = 0;
+
+  for (const player of activePlayers(room)) {
+    if (hasActiveBindings(player)) {
+      clearBindingsAfterAction(player);
+      clearedBindings += 1;
+    }
+  }
+
+  resetEmptyTablePasses(game);
+  if (clearedBindings > 0) {
+    addEvent(room, '空の場で全員がパスしたため、残っている縛りをすべて解除しました', 'system');
+  }
+
+  if (finishGameIfReady(room)) {
+    return;
+  }
+
+  const leadId = firstActiveFrom(room, leadBaseId);
+  const lead = leadId ? getPlayer(room, leadId) : null;
+  if (lead) {
+    addEvent(room, `${lead.name}さんが縛りなしで新しい場を開始します`, 'system');
+  }
+  setCurrentPlayerWithSkips(room, leadId);
 }
 
 function bindingForEffect(effect, play) {
@@ -663,6 +829,7 @@ function playCards(room, playerId, cardIds) {
   }
 
   const play = analyzePlay(room, player, cardIds);
+  const consumedBindings = hasActiveBindings(player);
   player.hand = sortHand(removeCardsFromHand(player.hand, cardIds));
   clearBindingsAfterAction(player);
 
@@ -680,12 +847,16 @@ function playCards(room, playerId, cardIds) {
   room.game.passes = room.game.passes.filter((id) => id !== playerId);
   room.game.resolvingActorId = playerId;
   room.game.forceLeadPlayerId = null;
+  resetEmptyTablePasses(room.game);
 
   addEvent(
     room,
     `${player.name}さんが${play.cards.map((card) => publicCard(card).label).join(' ')}を出しました`,
     'play'
   );
+  if (consumedBindings) {
+    addEvent(room, `${player.name}さんの縛りが解除されました`, 'rule');
+  }
 
   const triggeredRules = orderTriggeredRules(getTriggeredRules(room.rules, play));
   for (const rule of triggeredRules) {
@@ -726,13 +897,23 @@ function passTurn(room, playerId) {
     if (!hasActiveBindings(player)) {
       throw new Error('場が空のときはカードを出してください');
     }
-    clearBindingsAfterAction(player);
-    addEvent(room, `${player.name}さんが縛りを解除するためパスしました`, 'pass');
+
+    logNoLegalPlayIfBound(room, player);
+    clearBindingsAfterActionWithEvent(room, player);
+    addEvent(room, `${player.name}さんがパスしました`, 'pass');
+    recordEmptyTablePass(room, playerId);
+
+    if (allActivePlayersPassedEmptyTable(room)) {
+      recoverFromEmptyTablePassLoop(room);
+      return;
+    }
+
     setCurrentPlayerWithSkips(room, nextActivePlayerId(room, playerId));
     return;
   }
 
-  clearBindingsAfterAction(player);
+  logNoLegalPlayIfBound(room, player);
+  clearBindingsAfterActionWithEvent(room, player);
   room.game.passes = [...new Set([...room.game.passes, playerId])];
   addEvent(room, `${player.name}さんがパスしました`, 'pass');
 
@@ -911,6 +1092,7 @@ function applyEffect(room, effectAction, targets) {
     game.lastPlayBy = null;
     game.passes = [];
     game.forceLeadPlayerId = actor.id;
+    resetEmptyTablePasses(game);
     addEvent(room, `${effectLabel(room, effectAction)}: 場が流れました`, 'rule');
     return 'done';
   }
@@ -1061,6 +1243,7 @@ function clearTableAfterPasses(room) {
   game.table = null;
   game.lastPlayBy = null;
   game.passes = [];
+  resetEmptyTablePasses(game);
 
   addEvent(room, '自分以外の全員がパスしたため、場が流れました', 'system');
 
@@ -1131,6 +1314,10 @@ function leavePlayer(room, playerId) {
 function handlePlayingLeave(room, playerId) {
   const game = room.game;
   game.passes = game.passes.filter((id) => id !== playerId);
+  game.emptyTablePasses = (game.emptyTablePasses || []).filter((id) => id !== playerId);
+  if (game.emptyTableFirstPasserId === playerId) {
+    game.emptyTableFirstPasserId = game.emptyTablePasses[0] || null;
+  }
 
   if (game.pendingAction?.actorId === playerId) {
     game.effectQueue = game.effectQueue.filter((action) => action.actorId !== playerId);
@@ -1173,6 +1360,11 @@ function handlePlayingLeave(room, playerId) {
     return;
   }
 
+  if (!game.table && game.emptyTablePasses?.length > 0 && allActivePlayersPassedEmptyTable(room)) {
+    recoverFromEmptyTablePassLoop(room);
+    return;
+  }
+
   if (game.currentPlayerId === playerId) {
     setCurrentPlayerWithSkips(room, nextActivePlayerId(room, playerId));
     return;
@@ -1203,6 +1395,7 @@ module.exports = {
   chooseTarget,
   chooseTransferCard,
   directionLabel,
+  getTurnAvailability,
   getPlayer,
   isGamePaused,
   leavePlayer,

@@ -9,6 +9,7 @@ const {
   chooseTarget,
   chooseTransferCard,
   directionLabel,
+  getTurnAvailability,
   isGamePaused,
   leavePlayer,
   passTurn,
@@ -175,7 +176,8 @@ function createRoomManager() {
             rankings: room.game.rankings,
             phase: room.game.phase,
             paused: isGamePaused(room),
-            pendingAction
+            pendingAction,
+            turnAvailability: getTurnAvailability(room, viewerId)
           }
         : null,
       match: getPublicMatchState(room, viewerId),

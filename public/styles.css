@@ -337,6 +337,33 @@ form,
   grid-template-columns: repeat(auto-fill, minmax(64px, 1fr));
 }
 
+.turn-constraint-notice {
+  display: grid;
+  gap: 5px;
+  margin-bottom: 12px;
+  border: 1px solid #e4c9a1;
+  border-radius: 8px;
+  background: #fff7e8;
+  padding: 10px 12px;
+  color: #6d4710;
+}
+
+.turn-constraint-notice strong {
+  font-size: 0.95rem;
+}
+
+.turn-constraint-notice span,
+.turn-constraint-notice li {
+  line-height: 1.35;
+}
+
+.turn-constraint-notice ul {
+  display: grid;
+  gap: 3px;
+  margin: 0;
+  padding-left: 18px;
+}
+
 .card-face,
 .card-button {
   display: grid;
