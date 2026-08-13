@@ -243,6 +243,7 @@ function startRound(room, options = {}) {
     player.finishedRank = null;
     player.skipTurns = 0;
     player.bindingSuit = null;
+    player.bindings = [];
   }
 
   deck.forEach((card, index) => {
@@ -341,6 +342,7 @@ function clearRoundState(room) {
     player.hand = [];
     player.skipTurns = 0;
     player.bindingSuit = null;
+    player.bindings = [];
   }
 
   if (!room.game) return;
@@ -487,6 +489,7 @@ function restartMatch(room, playerId) {
     player.finishedRank = null;
     player.skipTurns = 0;
     player.bindingSuit = null;
+    player.bindings = [];
   }
 
   room.rules = [];
@@ -532,10 +535,6 @@ function analyzePlay(room, player, cardIds) {
     }
   }
 
-  if (player.bindingSuit && !cardsContainSuit(cards, player.bindingSuit)) {
-    throw new Error(`${describeSuit(player.bindingSuit)}を含む手だけ出せます`);
-  }
-
   const ruleRanks = new Set(printedRanks);
   if (hasJoker) {
     ruleRanks.add(effectiveRank);
@@ -548,6 +547,11 @@ function analyzePlay(room, player, cardIds) {
     }
   }
   const playedSuits = new Set(nonJokers.map((card) => card.suit));
+  const previousSuits = table
+    ? new Set(table.ruleSuits || table.cards?.flatMap((card) => (card.joker ? SUITS.map((suit) => suit.id) : [card.suit])) || [])
+    : new Set();
+
+  validateBindingsForPlay(player, cards, effectiveRank);
 
   return {
     cards,
@@ -558,27 +562,90 @@ function analyzePlay(room, player, cardIds) {
     ruleRanks,
     ruleSuits,
     playedSuits,
+    previousRank: table?.rank || null,
+    previousSuits,
     playedCardLabels: cards.map((card) => card.id)
   };
-}
-
-function bindingSuitForRule(rule, play) {
-  if (rule.condition.suit) {
-    return rule.condition.suit;
-  }
-
-  const playedSuit = SUITS.find((suit) => play.playedSuits.has(suit.id));
-  return playedSuit?.id || SUITS[0].id;
 }
 
 function cardsContainSuit(cards, suit) {
   return cards.some((card) => card.joker || card.suit === suit);
 }
 
-function clearBindingAfterSuccessfulPlay(player) {
-  if (player.bindingSuit) {
-    player.bindingSuit = null;
+function cardsContainAnySuit(cards, suits) {
+  return suits.some((suit) => cardsContainSuit(cards, suit));
+}
+
+function nextRank(rank) {
+  const index = RANKS.indexOf(rank);
+  if (index < 0 || index >= RANKS.length - 1) return null;
+  return RANKS[index + 1];
+}
+
+function activeBindings(player) {
+  if (Array.isArray(player.bindings) && player.bindings.length > 0) {
+    return player.bindings;
   }
+  if (player.bindingSuit) {
+    return [{ type: 'suit', suits: [player.bindingSuit] }];
+  }
+  return [];
+}
+
+function hasActiveBindings(player) {
+  return activeBindings(player).length > 0;
+}
+
+function validateBindingsForPlay(player, cards, effectiveRank) {
+  for (const binding of activeBindings(player)) {
+    if (binding.type === 'suit' && !cardsContainAnySuit(cards, binding.suits || [])) {
+      throw new Error(`スート縛り: ${bindingSuitsLabel(binding.suits)}を含む手だけ出せます`);
+    }
+    if ((binding.type === 'rank' || binding.type === 'step') && !(binding.ranks || []).includes(effectiveRank)) {
+      throw new Error(`${bindingLabel(binding)}だけ出せます`);
+    }
+  }
+}
+
+function clearBindingsAfterAction(player) {
+  player.bindings = [];
+  player.bindingSuit = null;
+}
+
+function bindingSuitsLabel(suits = []) {
+  return suits.map((suit) => describeSuit(suit)).join(' または ') || '指定スートなし';
+}
+
+function bindingRanksLabel(ranks = []) {
+  return ranks.length > 0 ? ranks.join(' または ') : '出せる数字なし';
+}
+
+function bindingLabel(binding) {
+  if (binding.type === 'suit') {
+    return `スート縛り: ${bindingSuitsLabel(binding.suits)}`;
+  }
+  if (binding.type === 'rank') {
+    return `数字縛り: ${bindingRanksLabel(binding.ranks)}`;
+  }
+  if (binding.type === 'step') {
+    return `階段縛り: ${bindingRanksLabel(binding.ranks)}`;
+  }
+  return '縛り';
+}
+
+function bindingForEffect(effect, play) {
+  if (effect === 'bindSuit') {
+    const suits = [...play.playedSuits];
+    return { type: 'suit', suits: suits.length > 0 ? suits : [SUITS[0].id] };
+  }
+  if (effect === 'bindRank') {
+    return { type: 'rank', ranks: [play.effectiveRank] };
+  }
+  if (effect === 'bindStep') {
+    const rank = nextRank(play.effectiveRank);
+    return { type: 'step', ranks: rank ? [rank] : [] };
+  }
+  return null;
 }
 
 function playCards(room, playerId, cardIds) {
@@ -597,13 +664,15 @@ function playCards(room, playerId, cardIds) {
 
   const play = analyzePlay(room, player, cardIds);
   player.hand = sortHand(removeCardsFromHand(player.hand, cardIds));
-  clearBindingAfterSuccessfulPlay(player);
+  clearBindingsAfterAction(player);
 
   room.game.table = {
     cards: play.cards,
     count: play.count,
     rank: play.effectiveRank,
     rankValue: play.rankValue,
+    ruleRanks: [...play.ruleRanks],
+    ruleSuits: [...play.ruleSuits],
     playedBy: playerId,
     playedAt: Date.now()
   };
@@ -632,7 +701,7 @@ function playCards(room, playerId, cardIds) {
       effect: rule.effect,
       target: rule.target,
       condition: rule.condition,
-      requiredSuit: rule.effect === 'bindSuit' ? bindingSuitForRule(rule, play) : null,
+      binding: bindingForEffect(rule.effect, play),
       selectedTargetIds: null
     });
   }
@@ -648,14 +717,22 @@ function passTurn(room, playerId) {
   if (room.game.currentPlayerId !== playerId) {
     throw new Error('あなたのターンではありません');
   }
-  if (!room.game.table) {
-    throw new Error('場が空のときはカードを出してください');
-  }
-
   const player = requirePlayer(room, playerId);
   if (player.left || player.finishedRank) {
     throw new Error('参加中のプレイヤーではありません');
   }
+
+  if (!room.game.table) {
+    if (!hasActiveBindings(player)) {
+      throw new Error('場が空のときはカードを出してください');
+    }
+    clearBindingsAfterAction(player);
+    addEvent(room, `${player.name}さんが縛りを解除するためパスしました`, 'pass');
+    setCurrentPlayerWithSkips(room, nextActivePlayerId(room, playerId));
+    return;
+  }
+
+  clearBindingsAfterAction(player);
   room.game.passes = [...new Set([...room.game.passes, playerId])];
   addEvent(room, `${player.name}さんがパスしました`, 'pass');
 
@@ -815,15 +892,15 @@ function applyEffect(room, effectAction, targets) {
     return 'done';
   }
 
-  if (effectAction.effect === 'bindSuit') {
+  if (['bindSuit', 'bindRank', 'bindStep'].includes(effectAction.effect)) {
+    const binding = effectAction.binding;
     for (const target of targets) {
-      target.bindingSuit = effectAction.requiredSuit;
+      target.bindings = [...activeBindings(target), binding].filter(Boolean);
+      target.bindingSuit = target.bindings.find((candidate) => candidate.type === 'suit')?.suits?.[0] || null;
     }
     addEvent(
       room,
-      `${effectLabel(room, effectAction)}: ${targetNames(targets)}は次回プレイで${describeSuit(
-        effectAction.requiredSuit
-      )}が必要です`,
+      `${effectLabel(room, effectAction)}: ${targetNames(targets)}に${bindingLabel(binding)}をかけました`,
       'rule'
     );
     return 'done';
@@ -1026,6 +1103,7 @@ function leavePlayer(room, playerId) {
   player.hand = [];
   player.skipTurns = 0;
   player.bindingSuit = null;
+  player.bindings = [];
 
   if (room.hostId === playerId) {
     const nextHost = room.players.find((candidate) => !candidate.left);

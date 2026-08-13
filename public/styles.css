@@ -553,6 +553,35 @@ form,
   padding-block: 6px;
 }
 
+.relation-options {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(128px, 1fr));
+  gap: 8px;
+}
+
+.relation-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 38px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fffef9;
+  padding: 7px 9px;
+  color: var(--ink);
+  font-size: 0.78rem;
+}
+
+.relation-toggle input {
+  width: 18px;
+  min-height: 18px;
+  accent-color: var(--accent);
+}
+
+.relation-toggle span {
+  font-weight: 800;
+}
+
 .puzzle-arrow {
   display: grid;
   place-items: center;
@@ -750,6 +779,7 @@ form,
   }
 
   .compact-form,
+  .relation-options,
   .condition-sockets,
   .piece-choice-grid {
     grid-template-columns: 1fr;

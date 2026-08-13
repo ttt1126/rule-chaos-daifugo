@@ -150,6 +150,7 @@ function createRoomManager() {
           return result?.rank || null;
         }) || [],
         skipTurns: player.skipTurns,
+        bindings: publicBindings(player),
         bindingSuit: player.bindingSuit,
         bindingSuitLabel: player.bindingSuit ? SUIT_SYMBOLS[player.bindingSuit] : null
       })),
@@ -251,11 +252,43 @@ function createRoomManager() {
 
 function validTargetsByEffect() {
   return Object.fromEntries(
-    ['skip', 'bindSuit', 'reverse', 'clear', 'gift'].map((effect) => [
+    ['skip', 'bindSuit', 'bindRank', 'bindStep', 'reverse', 'clear', 'gift'].map((effect) => [
       effect,
       validTargetsForEffect(effect)
     ])
   );
+}
+
+function publicBindings(player) {
+  const bindings = Array.isArray(player.bindings) && player.bindings.length > 0
+    ? player.bindings
+    : player.bindingSuit
+      ? [{ type: 'suit', suits: [player.bindingSuit] }]
+      : [];
+
+  return bindings.map((binding) => {
+    if (binding.type === 'suit') {
+      const suits = binding.suits || [];
+      return {
+        type: 'suit',
+        label: `スート縛り: ${suits.map((suit) => SUIT_SYMBOLS[suit] || suit).join(' / ')}`
+      };
+    }
+    if (binding.type === 'rank') {
+      return {
+        type: 'rank',
+        label: `数字縛り: ${(binding.ranks || []).join(' / ')}`
+      };
+    }
+    if (binding.type === 'step') {
+      const ranks = binding.ranks || [];
+      return {
+        type: 'step',
+        label: `階段縛り: ${ranks.length > 0 ? `${ranks.join(' / ')}のみ` : 'パスのみ'}`
+      };
+    }
+    return { type: binding.type || 'unknown', label: '縛り' };
+  });
 }
 
 function getPublicMatchState(room, viewerId) {
@@ -358,7 +391,8 @@ function createPlayer(name) {
     hand: [],
     finishedRank: null,
     skipTurns: 0,
-    bindingSuit: null
+    bindingSuit: null,
+    bindings: []
   };
 }
 

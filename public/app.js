@@ -17,6 +17,8 @@ const CONDITION_POWER = {
   rank: 2,
   jokerRank: 3,
   suit: 2,
+  rankRelationPlusOne: 2,
+  suitRelationSame: 2,
   counts: { 1: 1, 2: 2, 3: 3, 4: 4 },
   max: 4
 };
@@ -34,7 +36,17 @@ const EFFECT_CONFIGS = {
     targets: ['self', 'next', 'any']
   },
   bindSuit: {
-    label: '縛り',
+    label: 'スート縛り',
+    connectors: ['SELF', 'NEXT', 'CHOICE', 'GLOBAL'],
+    targets: ['self', 'next', 'any', 'all']
+  },
+  bindRank: {
+    label: '数字縛り',
+    connectors: ['SELF', 'NEXT', 'CHOICE', 'GLOBAL'],
+    targets: ['self', 'next', 'any', 'all']
+  },
+  bindStep: {
+    label: '階段縛り',
     connectors: ['SELF', 'NEXT', 'CHOICE', 'GLOBAL'],
     targets: ['self', 'next', 'any', 'all']
   },
@@ -71,7 +83,7 @@ let roomState = null;
 let selectedCardIds = new Set();
 let message = '';
 let ruleDraft = {
-  condition: { rank: '', suit: '', count: '' },
+  condition: { rank: '', suit: '', count: '', rankRelation: '', suitRelation: '' },
   target: 'next',
   effect: 'skip'
 };
@@ -207,6 +219,8 @@ document.addEventListener('change', (event) => {
     const fieldName = field.dataset.ruleField;
     if (fieldName === 'rank' || fieldName === 'suit' || fieldName === 'count') {
       ruleDraft.condition[fieldName] = field.value;
+    } else if (fieldName === 'rankRelation' || fieldName === 'suitRelation') {
+      ruleDraft.condition[fieldName] = field.checked ? field.value : '';
     } else {
       ruleDraft[fieldName] = field.value;
     }
@@ -237,7 +251,9 @@ document.addEventListener('click', (event) => {
       condition: {
         rank: ruleDraft.condition.rank || null,
         suit: ruleDraft.condition.suit || null,
-        count: ruleDraft.condition.count || null
+        count: ruleDraft.condition.count || null,
+        rankRelation: ruleDraft.condition.rankRelation || null,
+        suitRelation: ruleDraft.condition.suitRelation || null
       },
       target: ruleDraft.target,
       effect: ruleDraft.effect
@@ -691,7 +707,7 @@ function renderPlayers() {
                     ${roomState.match ? `<span>${player.score || 0}pt</span>` : ''}
                     ${player.finishedRank ? `<span>${player.finishedRank}位</span>` : ''}
                     ${player.skipTurns ? `<span>スキップ ${player.skipTurns}</span>` : ''}
-                    ${player.bindingSuit ? `<span>縛り ${player.bindingSuitLabel}</span>` : ''}
+                    ${(player.bindings || []).map((binding) => `<span>${escapeHtml(binding.label)}</span>`).join('')}
                   </div>
                 </div>
                 <span class="card-count">${player.cardCount}枚</span>
@@ -872,6 +888,26 @@ function renderRuleBuilder() {
                 <option value="">指定なし</option>
                 ${[1, 2, 3, 4].map((count) => option(String(count), `${count}枚`, String(ruleDraft.condition.count))).join('')}
               </select>
+            </label>
+          </div>
+          <div class="relation-options" aria-label="直前プレイとの関係条件">
+            <label class="relation-toggle">
+              <input
+                data-rule-field="rankRelation"
+                type="checkbox"
+                value="plusOne"
+                ${ruleDraft.condition.rankRelation === 'plusOne' ? 'checked' : ''}
+              />
+              <span>直前より+1</span>
+            </label>
+            <label class="relation-toggle">
+              <input
+                data-rule-field="suitRelation"
+                type="checkbox"
+                value="same"
+                ${ruleDraft.condition.suitRelation === 'same' ? 'checked' : ''}
+              />
+              <span>直前と同じスート</span>
             </label>
           </div>
           ${renderConditionSockets(power, selectedConnector)}
@@ -1097,26 +1133,30 @@ function previewRule() {
 }
 
 function previewCondition() {
-  const conditionParts = [];
+  const cardParts = [];
   if (ruleDraft.condition.suit) {
-    conditionParts.push(SUITS.find(([id]) => id === ruleDraft.condition.suit)?.[1] || '');
+    cardParts.push(SUITS.find(([id]) => id === ruleDraft.condition.suit)?.[1] || '');
   }
   if (ruleDraft.condition.rank) {
-    conditionParts.push(ruleDraft.condition.rank);
+    cardParts.push(ruleDraft.condition.rank);
   }
 
-  let conditionText = conditionParts.join('');
+  const phrases = [];
+  const cardText = cardParts.join('');
   if (ruleDraft.condition.count) {
-    conditionText = conditionText
-      ? `${conditionText}を含む${ruleDraft.condition.count}枚出しをしたら`
-      : `${ruleDraft.condition.count}枚出しをしたら`;
-  } else if (conditionText) {
-    conditionText = `${conditionText}を出したら`;
-  } else {
-    conditionText = '条件を選んでください';
+    phrases.push(cardText ? `${cardText}を含む${ruleDraft.condition.count}枚出し` : `${ruleDraft.condition.count}枚出し`);
+  } else if (cardText) {
+    phrases.push(`${cardText}を出す`);
   }
 
-  return conditionText;
+  if (ruleDraft.condition.rankRelation === 'plusOne') {
+    phrases.push('直前より1大きい数字');
+  }
+  if (ruleDraft.condition.suitRelation === 'same') {
+    phrases.push('直前と同じスート');
+  }
+
+  return phrases.length > 0 ? `${phrases.join('、かつ')}を満たしたら` : '条件を選んでください';
 }
 
 function previewEffect() {
@@ -1129,6 +1169,12 @@ function previewEffect() {
   }
   if (ruleDraft.effect === 'bindSuit') {
     return `${targetLabel}にスート縛りをかける`;
+  }
+  if (ruleDraft.effect === 'bindRank') {
+    return `${targetLabel}に数字縛りをかける`;
+  }
+  if (ruleDraft.effect === 'bindStep') {
+    return `${targetLabel}に階段縛りをかける`;
   }
   if (ruleDraft.effect === 'gift') {
     return `${targetLabel}へカードを1枚渡す`;
@@ -1143,7 +1189,13 @@ function previewEffect() {
 }
 
 function validateRuleDraft() {
-  if (!ruleDraft.condition.rank && !ruleDraft.condition.suit && !ruleDraft.condition.count) {
+  if (
+    !ruleDraft.condition.rank &&
+    !ruleDraft.condition.suit &&
+    !ruleDraft.condition.count &&
+    !ruleDraft.condition.rankRelation &&
+    !ruleDraft.condition.suitRelation
+  ) {
     return { ok: false, message: '条件を1つ以上選んでください' };
   }
 
@@ -1175,6 +1227,12 @@ function calculateConditionPower(condition) {
   }
   if (condition.count) {
     power += CONDITION_POWER.counts[Number(condition.count)] || 0;
+  }
+  if (condition.rankRelation === 'plusOne') {
+    power += CONDITION_POWER.rankRelationPlusOne;
+  }
+  if (condition.suitRelation === 'same') {
+    power += CONDITION_POWER.suitRelationSame;
   }
   return Math.min(CONDITION_POWER.max, power);
 }
@@ -1307,7 +1365,7 @@ function formatRoundRanks(ranks) {
 
 function resetRuleDraft() {
   ruleDraft = {
-    condition: { rank: '', suit: '', count: '' },
+    condition: { rank: '', suit: '', count: '', rankRelation: '', suitRelation: '' },
     target: 'next',
     effect: 'skip'
   };

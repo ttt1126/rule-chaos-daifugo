@@ -25,6 +25,8 @@ const CONDITION_POWER = {
   rank: 2,
   jokerRank: 3,
   suit: 2,
+  rankRelationPlusOne: 2,
+  suitRelationSame: 2,
   counts: {
     1: 1,
     2: 2,
@@ -61,8 +63,22 @@ const EFFECTS = {
   },
   bindSuit: {
     id: 'bindSuit',
-    label: '縛り',
+    label: 'スート縛り',
     order: 30,
+    targets: ['self', 'next', 'any', 'all'],
+    connectors: ['SELF', 'NEXT', 'CHOICE', 'GLOBAL']
+  },
+  bindRank: {
+    id: 'bindRank',
+    label: '数字縛り',
+    order: 31,
+    targets: ['self', 'next', 'any', 'all'],
+    connectors: ['SELF', 'NEXT', 'CHOICE', 'GLOBAL']
+  },
+  bindStep: {
+    id: 'bindStep',
+    label: '階段縛り',
+    order: 32,
     targets: ['self', 'next', 'any', 'all'],
     connectors: ['SELF', 'NEXT', 'CHOICE', 'GLOBAL']
   },

@@ -12,6 +12,8 @@ const {
 const VALID_RANKS = new Set([...RANKS, 'JOKER']);
 const VALID_SUITS = new Set(SUITS.map((suit) => suit.id));
 const VALID_COUNTS = new Set([1, 2, 3, 4]);
+const VALID_RANK_RELATIONS = new Set(['plusOne']);
+const VALID_SUIT_RELATIONS = new Set(['same']);
 
 function normalizeNullable(value) {
   if (value === undefined || value === null || value === '' || value === 'none') {
@@ -33,6 +35,8 @@ function normalizeRuleInput(input) {
   const suit = normalizeNullable(condition.suit);
   const rawCount = normalizeNullable(condition.count);
   const count = rawCount === null ? null : Number(rawCount);
+  const rankRelation = normalizeNullable(condition.rankRelation);
+  const suitRelation = normalizeNullable(condition.suitRelation);
   const effect = input?.effect;
   const effectConfig = EFFECTS[effect];
 
@@ -48,7 +52,13 @@ function normalizeRuleInput(input) {
   if (count !== null && !VALID_COUNTS.has(count)) {
     throw new Error('枚数条件は1〜4枚から選んでください');
   }
-  if (rank === null && suit === null && count === null) {
+  if (rankRelation !== null && !VALID_RANK_RELATIONS.has(rankRelation)) {
+    throw new Error('存在しない数字関係条件です');
+  }
+  if (suitRelation !== null && !VALID_SUIT_RELATIONS.has(suitRelation)) {
+    throw new Error('存在しないスート関係条件です');
+  }
+  if (rank === null && suit === null && count === null && rankRelation === null && suitRelation === null) {
     throw new Error('少なくとも1つの条件を指定してください');
   }
 
@@ -57,7 +67,7 @@ function normalizeRuleInput(input) {
     target = 'none';
   }
   const normalized = {
-    condition: { rank, suit, count },
+    condition: { rank, suit, count, rankRelation, suitRelation },
     target,
     effect
   };
@@ -101,6 +111,8 @@ function calculateConditionPower(condition = {}) {
   const suit = normalizeNullable(condition.suit);
   const rawCount = normalizeNullable(condition.count);
   const count = rawCount === null ? null : Number(rawCount);
+  const rankRelation = normalizeNullable(condition.rankRelation);
+  const suitRelation = normalizeNullable(condition.suitRelation);
 
   if (rank) {
     power += rank === 'JOKER' ? CONDITION_POWER.jokerRank : CONDITION_POWER.rank;
@@ -110,6 +122,12 @@ function calculateConditionPower(condition = {}) {
   }
   if (count !== null) {
     power += CONDITION_POWER.counts[count] || 0;
+  }
+  if (rankRelation === 'plusOne') {
+    power += CONDITION_POWER.rankRelationPlusOne;
+  }
+  if (suitRelation === 'same') {
+    power += CONDITION_POWER.suitRelationSame;
   }
 
   return Math.min(CONDITION_POWER.max, power);
@@ -153,6 +171,27 @@ function conditionMatchesPlay(condition, play) {
     return false;
   }
 
+  if (condition.rankRelation === 'plusOne') {
+    if (!play.previousRank || !play.effectiveRank) {
+      return false;
+    }
+    const previousIndex = RANKS.indexOf(play.previousRank);
+    const currentIndex = RANKS.indexOf(play.effectiveRank);
+    if (previousIndex < 0 || currentIndex !== previousIndex + 1) {
+      return false;
+    }
+  }
+
+  if (condition.suitRelation === 'same') {
+    if (!play.previousSuits || play.previousSuits.size === 0) {
+      return false;
+    }
+    const hasCommonSuit = [...play.ruleSuits].some((suit) => play.previousSuits.has(suit));
+    if (!hasCommonSuit) {
+      return false;
+    }
+  }
+
   return true;
 }
 
@@ -173,28 +212,41 @@ function ruleSignature(rule) {
     rule.condition.rank || '*',
     rule.condition.suit || '*',
     rule.condition.count || '*',
+    rule.condition.rankRelation || '*',
+    rule.condition.suitRelation || '*',
     rule.target,
     rule.effect
   ].join('|');
 }
 
 function describeCondition(condition) {
-  const parts = [];
+  const cardParts = [];
   if (condition.suit) {
-    parts.push(SUIT_SYMBOLS[condition.suit]);
+    cardParts.push(SUIT_SYMBOLS[condition.suit]);
   }
   if (condition.rank) {
-    parts.push(condition.rank === 'JOKER' ? 'JOKER' : condition.rank);
+    cardParts.push(condition.rank === 'JOKER' ? 'JOKER' : condition.rank);
   }
 
-  let cardText = parts.join('');
+  let cardText = cardParts.join('');
   if (condition.count) {
     cardText = cardText ? `${cardText}を含む${condition.count}枚出し` : `${condition.count}枚出し`;
   } else if (cardText) {
     cardText = `${cardText}を出す`;
   }
 
-  return cardText || '条件なし';
+  const relationParts = [];
+  if (condition.rankRelation === 'plusOne') {
+    relationParts.push('直前より+1');
+  }
+  if (condition.suitRelation === 'same') {
+    relationParts.push('直前と同じスート');
+  }
+
+  if (cardText && relationParts.length > 0) {
+    return `${cardText}かつ${relationParts.join('かつ')}`;
+  }
+  return cardText || relationParts.join('かつ') || '条件なし';
 }
 
 function describeTarget(target) {

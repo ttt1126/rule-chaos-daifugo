@@ -15,6 +15,7 @@ const {
   calculateConditionPower,
   conditionUnlocksTarget,
   effectSupportsTarget,
+  getTriggeredRules,
   normalizeRuleInput
 } = require('../src/ruleEngine');
 
@@ -36,7 +37,8 @@ function makeRoom(hands) {
     hand,
     finishedRank: null,
     skipTurns: 0,
-    bindingSuit: null
+    bindingSuit: null,
+    bindings: []
   }));
 
   return {
@@ -74,6 +76,8 @@ test('conditionPowerは条件から計算され、最大4で止まる', () => {
   assert.equal(calculateConditionPower({ rank: '7' }), 2);
   assert.equal(calculateConditionPower({ suit: 'S' }), 2);
   assert.equal(calculateConditionPower({ rank: 'JOKER' }), 3);
+  assert.equal(calculateConditionPower({ rankRelation: 'plusOne' }), 2);
+  assert.equal(calculateConditionPower({ suitRelation: 'same' }), 2);
   assert.equal(calculateConditionPower({ rank: '7', suit: 'S', count: 1 }), 4);
 });
 
@@ -96,6 +100,8 @@ test('効果と対象属性の互換性を判定できる', () => {
   assert.equal(effectSupportsTarget('bindSuit', 'next'), true);
   assert.equal(effectSupportsTarget('bindSuit', 'any'), true);
   assert.equal(effectSupportsTarget('bindSuit', 'all'), true);
+  assert.equal(effectSupportsTarget('bindRank', 'all'), true);
+  assert.equal(effectSupportsTarget('bindStep', 'all'), true);
   assert.equal(effectSupportsTarget('gift', 'next'), true);
   assert.equal(effectSupportsTarget('gift', 'any'), true);
   assert.equal(effectSupportsTarget('gift', 'self'), false);
@@ -120,6 +126,62 @@ test('4段コネクタの成立と不成立をサーバー側で検証する', (
   assert.throws(() => normalizeRuleInput({ condition: { count: 4 }, target: 'all', effect: 'skip' }), /対象にできません/);
   assert.doesNotThrow(() =>
     normalizeRuleInput({ condition: { count: 4 }, target: 'all', effect: 'bindSuit' })
+  );
+  assert.doesNotThrow(() =>
+    normalizeRuleInput({ condition: { rankRelation: 'plusOne' }, target: 'next', effect: 'bindRank' })
+  );
+});
+
+test('直前より+1条件は通常ランク順で成立し、2から3へ循環しない', () => {
+  const rule = normalizeRuleInput({
+    condition: { rankRelation: 'plusOne' },
+    effect: 'skip',
+    target: 'next'
+  });
+
+  assert.equal(getTriggeredRules([rule], { effectiveRank: '7', previousRank: '6', ruleSuits: new Set(), count: 1 }).length, 1);
+  assert.equal(getTriggeredRules([rule], { effectiveRank: 'J', previousRank: '10', ruleSuits: new Set(), count: 1 }).length, 1);
+  assert.equal(getTriggeredRules([rule], { effectiveRank: '2', previousRank: 'A', ruleSuits: new Set(), count: 1 }).length, 1);
+  assert.equal(getTriggeredRules([rule], { effectiveRank: '3', previousRank: '2', ruleSuits: new Set(), count: 1 }).length, 0);
+  assert.equal(getTriggeredRules([rule], { effectiveRank: '7', previousRank: null, ruleSuits: new Set(), count: 1 }).length, 0);
+});
+
+test('直前と同じスート条件は共通スートがある場合だけ成立する', () => {
+  const rule = normalizeRuleInput({
+    condition: { suitRelation: 'same' },
+    effect: 'skip',
+    target: 'next'
+  });
+
+  assert.equal(
+    getTriggeredRules([rule], {
+      effectiveRank: '9',
+      previousRank: '7',
+      ruleSuits: new Set(['S']),
+      previousSuits: new Set(['S']),
+      count: 1
+    }).length,
+    1
+  );
+  assert.equal(
+    getTriggeredRules([rule], {
+      effectiveRank: '9',
+      previousRank: '7',
+      ruleSuits: new Set(['H']),
+      previousSuits: new Set(['S']),
+      count: 1
+    }).length,
+    0
+  );
+  assert.equal(
+    getTriggeredRules([rule], {
+      effectiveRank: '8',
+      previousRank: '7',
+      ruleSuits: new Set(['H', 'D']),
+      previousSuits: new Set(['S', 'H']),
+      count: 2
+    }).length,
+    1
   );
 });
 
@@ -166,6 +228,41 @@ test('自分以外の全員がパスすると場が流れる', () => {
   assert.equal(room.game.currentPlayerId, 'p1');
 });
 
+test('直前条件は場流し後の先頭プレイでは発動しない', () => {
+  const room = makeRoom({
+    p1: [card('a', '7', 'S'), card('b', '8', 'S')],
+    p2: [card('c', '4', 'H'), card('d', '9', 'H')]
+  });
+  addRule(room, 'p1', {
+    condition: { rankRelation: 'plusOne', suit: 'S' },
+    effect: 'reverse',
+    target: 'none'
+  }, { system: true });
+
+  playCards(room, 'p1', ['a']);
+  assert.equal(room.game.direction, 1);
+  passTurn(room, 'p2');
+  playCards(room, 'p1', ['b']);
+  assert.equal(room.game.direction, 1);
+});
+
+test('ジョーカーの有効数字で直前より+1条件が成立する', () => {
+  const room = makeRoom({
+    p1: [card('a', '7', 'S'), card('b', '9', 'S')],
+    p2: [joker()]
+  });
+  addRule(room, 'p1', {
+    condition: { rankRelation: 'plusOne', suit: 'S' },
+    effect: 'reverse',
+    target: 'none'
+  }, { system: true });
+
+  playCards(room, 'p1', ['a']);
+  playCards(room, 'p2', ['JK-1']);
+  assert.equal(room.game.table.rank, '8');
+  assert.equal(room.game.direction, -1);
+});
+
 test('任意対象スキップは対象選択後に次回機会を飛ばす', () => {
   const room = makeRoom({
     p1: [card('a', '7', 'S'), card('b', '9', 'S')],
@@ -187,7 +284,7 @@ test('任意対象スキップは対象選択後に次回機会を飛ばす', ()
   assert.equal(room.game.currentPlayerId, 'p3');
 });
 
-test('縛りは対象の次回成功プレイにスートを要求し、パスでは解除されない', () => {
+test('スート縛りは発動プレイのスートを要求し、パスでも解除される', () => {
   const room = makeRoom({
     p1: [card('a', '7', 'S'), card('b', '9', 'C')],
     p2: [card('c', '8', 'H'), card('d', '9', 'S')]
@@ -201,10 +298,79 @@ test('縛りは対象の次回成功プレイにスートを要求し、パス�
 
   playCards(room, 'p1', ['a']);
   assert.equal(room.players.find((player) => player.id === 'p2').bindingSuit, 'S');
-  assert.throws(() => playCards(room, 'p2', ['c']), /スペード/);
+  assert.equal(room.players.find((player) => player.id === 'p2').bindings[0].type, 'suit');
+  assert.throws(() => playCards(room, 'p2', ['c']), /スート縛り/);
 
   passTurn(room, 'p2');
-  assert.equal(room.players.find((player) => player.id === 'p2').bindingSuit, 'S');
+  assert.equal(room.players.find((player) => player.id === 'p2').bindings.length, 0);
+});
+
+test('数字縛りは発動プレイと同じ数字だけを合法にする', () => {
+  const room = makeRoom({
+    p1: [card('a', '7', 'S'), card('b', '9', 'C')],
+    p2: [card('c', '8', 'H'), card('d', '9', 'H')]
+  });
+
+  addRule(room, 'p1', {
+    condition: { rank: '7', suit: 'S' },
+    effect: 'bindRank',
+    target: 'next'
+  }, { system: true });
+
+  playCards(room, 'p1', ['a']);
+  assert.equal(room.players.find((player) => player.id === 'p2').bindings[0].type, 'rank');
+  assert.throws(() => playCards(room, 'p2', ['c']), /数字縛り/);
+  passTurn(room, 'p2');
+  assert.equal(room.players.find((player) => player.id === 'p2').bindings.length, 0);
+});
+
+test('階段縛りは発動数字の1つ上だけを合法にし、2ならパスのみになる', () => {
+  const room = makeRoom({
+    p1: [card('a', '7', 'S'), card('b', '2', 'C')],
+    p2: [card('c', '9', 'H'), card('d', '8', 'H')]
+  });
+
+  addRule(room, 'p1', {
+    condition: { rank: '7', suit: 'S' },
+    effect: 'bindStep',
+    target: 'next'
+  }, { system: true });
+
+  playCards(room, 'p1', ['a']);
+  assert.equal(room.players.find((player) => player.id === 'p2').bindings[0].ranks[0], '8');
+  assert.throws(() => playCards(room, 'p2', ['c']), /階段縛り/);
+  playCards(room, 'p2', ['d']);
+
+  const room2 = makeRoom({
+    p1: [card('e', '2', 'S'), card('g', '4', 'C')],
+    p2: [card('f', '3', 'H')]
+  });
+  addRule(room2, 'p1', {
+    condition: { rank: '2', suit: 'S' },
+    effect: 'bindStep',
+    target: 'next'
+  }, { system: true });
+  playCards(room2, 'p1', ['e']);
+  assert.equal(room2.players.find((player) => player.id === 'p2').bindings[0].ranks.length, 0);
+  passTurn(room2, 'p2');
+  assert.equal(room2.players.find((player) => player.id === 'p2').bindings.length, 0);
+});
+
+test('複数縛りはAND条件として扱う', () => {
+  const room = makeRoom({
+    p1: [card('a', '7', 'S'), card('b', '9', 'C')],
+    p2: [card('c', '7', 'H'), card('d', '8', 'S'), card('e', '7', 'S')]
+  });
+  const p2 = room.players.find((player) => player.id === 'p2');
+  p2.bindings = [
+    { type: 'suit', suits: ['S'] },
+    { type: 'rank', ranks: ['7'] }
+  ];
+
+  room.game.currentPlayerId = 'p2';
+  assert.throws(() => playCards(room, 'p2', ['c']), /スート縛り/);
+  assert.throws(() => playCards(room, 'p2', ['d']), /数字縛り/);
+  playCards(room, 'p2', ['e']);
 });
 
 test('渡すは対象決定後にサーバー上の手札を移動する', () => {

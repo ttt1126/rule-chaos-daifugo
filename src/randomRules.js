@@ -6,8 +6,8 @@ function randomItem(items, rng) {
 }
 
 function buildCondition(effect, rng) {
-  const condition = { rank: null, suit: null, count: null };
-  const conditionSlots = ['rank', 'suit', 'count'];
+  const condition = { rank: null, suit: null, count: null, rankRelation: null, suitRelation: null };
+  const conditionSlots = ['rank', 'suit', 'count', 'rankRelation', 'suitRelation'];
   const slotCountRoll = rng();
   const desiredSlots = slotCountRoll < 0.55 ? 1 : slotCountRoll < 0.9 ? 2 : 3;
 
@@ -17,16 +17,16 @@ function buildCondition(effect, rng) {
       condition.rank = rng() < 0.08 ? 'JOKER' : randomItem(RANKS, rng);
     } else if (slot === 'suit') {
       condition.suit = randomItem(SUITS, rng).id;
+    } else if (slot === 'rankRelation') {
+      condition.rankRelation = 'plusOne';
+    } else if (slot === 'suitRelation') {
+      condition.suitRelation = 'same';
     } else {
       condition.count = randomItem([1, 2, 3, 4], rng);
     }
   }
 
-  if (effect === 'bindSuit' && !condition.suit) {
-    condition.suit = randomItem(SUITS, rng).id;
-  }
-
-  if (!condition.rank && !condition.suit && !condition.count) {
+  if (!condition.rank && !condition.suit && !condition.count && !condition.rankRelation && !condition.suitRelation) {
     condition.rank = randomItem(RANKS, rng);
   }
 
@@ -38,7 +38,7 @@ function generateRandomRules(count, options = {}) {
   const safeCount = HIDDEN_RULE_COUNTS.includes(Number(count)) ? Number(count) : 5;
   const startOrder = Number.isFinite(options.startOrder) ? options.startOrder : 0;
   const secret = Boolean(options.secret);
-  const effects = ['reverse', 'skip', 'bindSuit', 'gift', 'clear'];
+  const effects = ['reverse', 'skip', 'bindSuit', 'bindRank', 'bindStep', 'gift', 'clear'];
   const rules = [];
   const seen = new Set(options.existingSignatures || []);
   let attempts = 0;
