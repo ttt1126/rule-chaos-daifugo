@@ -1,7 +1,16 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
-const { addRule, chooseTarget, chooseTransferCard, leavePlayer, passTurn, playCards } = require('../src/gameLogic');
+const {
+  addRule,
+  beginRuleBuilding,
+  chooseTarget,
+  chooseTransferCard,
+  leavePlayer,
+  passTurn,
+  playCards,
+  startGame
+} = require('../src/gameLogic');
 const {
   calculateConditionPower,
   conditionUnlocksTarget,
@@ -34,10 +43,11 @@ function makeRoom(hands) {
     code: 'TEST1',
     hostId: players[0].id,
     status: 'playing',
-    settings: { mode: 'normal', hiddenRuleCount: 5 },
+    settings: { mode: 'normal', hiddenRuleCount: 5, roundCount: 4 },
     players,
     rules: [],
     events: [],
+    match: null,
     game: {
       direction: 1,
       currentPlayerId: players[0].id,
@@ -45,6 +55,7 @@ function makeRoom(hands) {
       lastPlayBy: null,
       passes: [],
       rankings: [],
+      roundPlayerIds: players.map((player) => player.id),
       phase: 'playing',
       pendingAction: null,
       effectQueue: [],
@@ -166,7 +177,7 @@ test('任意対象スキップは対象選択後に次回機会を飛ばす', ()
     condition: { rank: '7', count: 1 },
     effect: 'skip',
     target: 'any'
-  });
+  }, { system: true });
 
   playCards(room, 'p1', ['a']);
   assert.equal(room.game.phase, 'awaitingTarget');
@@ -186,7 +197,7 @@ test('縛りは対象の次回成功プレイにスートを要求し、パス�
     condition: { rank: '7', suit: 'S' },
     effect: 'bindSuit',
     target: 'next'
-  });
+  }, { system: true });
 
   playCards(room, 'p1', ['a']);
   assert.equal(room.players.find((player) => player.id === 'p2').bindingSuit, 'S');
@@ -207,7 +218,7 @@ test('渡すは対象決定後にサーバー上の手札を移動する', () =>
     condition: { rank: '7', count: 1 },
     effect: 'gift',
     target: 'any'
-  });
+  }, { system: true });
 
   playCards(room, 'p1', ['a']);
   chooseTarget(room, 'p1', room.game.pendingAction.id, 'p3');
@@ -233,7 +244,7 @@ test('隠しルールは発動後に公開される', () => {
       effect: 'reverse',
       target: 'none'
     },
-    { secret: true }
+    { secret: true, system: true }
   );
 
   assert.equal(room.rules[0].revealed, false);
@@ -256,7 +267,7 @@ test('Power不足のGLOBAL効果は追加できない', () => {
         condition: { count: 1 },
         effect: 'clear',
         target: 'none'
-      }),
+      }, { system: true }),
     /条件パワー/
   );
 });
@@ -273,12 +284,29 @@ test('流す効果はPower 4なら追加できる', () => {
     condition: { rank: '7', suit: 'S' },
     effect: 'clear',
     target: 'none'
-  });
+  }, { system: true });
 
   assert.equal(room.rules.length, 1);
 });
 
-test('開始前はホスト以外も特殊ルールを追加できる', () => {
+test('PLAYING中は通常プレイヤーが特殊ルールを追加できない', () => {
+  const room = makeRoom({
+    p1: [card('a', '7', 'S')],
+    p2: [card('b', '8', 'S')]
+  });
+
+  assert.throws(
+    () =>
+      addRule(room, 'p1', {
+        condition: { rank: '7' },
+        effect: 'skip',
+        target: 'next'
+      }),
+    /ルール追加フェーズ/
+  );
+});
+
+test('複数ラウンドでは終了後にルール追加フェーズを経て次ラウンドへ進む', () => {
   const room = makeRoom({
     p1: [],
     p2: []
@@ -286,14 +314,108 @@ test('開始前はホスト以外も特殊ルールを追加できる', () => {
   room.status = 'lobby';
   room.game = null;
 
+  startGame(room, 'p1', { rng: () => 0.5 });
+  room.players.find((player) => player.id === 'p1').hand = [card('a', '7', 'S')];
+  room.players.find((player) => player.id === 'p2').hand = [card('b', '8', 'S')];
+  room.game.currentPlayerId = 'p1';
+
+  playCards(room, 'p1', ['a']);
+
+  assert.equal(room.status, 'roundResult');
+  assert.equal(room.match.currentRound, 1);
+  assert.equal(room.match.scores.p1, 1);
+  assert.equal(room.match.scores.p2, 0);
+
+  assert.throws(
+    () =>
+      addRule(room, 'p1', {
+        condition: { rank: '7' },
+        effect: 'skip',
+        target: 'next'
+      }),
+    /ルール追加フェーズ/
+  );
+
+  beginRuleBuilding(room, 'p1');
+  assert.equal(room.status, 'ruleBuilding');
+  assert.equal(room.match.ruleBuilding.queue[0], 'p2');
+
+  assert.throws(
+    () =>
+      addRule(room, 'p1', {
+        condition: { rank: '7' },
+        effect: 'skip',
+        target: 'next'
+      }),
+    /あなたのルール追加ターン/
+  );
+
   addRule(room, 'p2', {
     condition: { rank: '7' },
     effect: 'skip',
     target: 'next'
   });
 
-  assert.equal(room.rules.length, 1);
-  assert.equal(room.rules[0].createdBy, 'p2');
+  assert.equal(room.match.ruleBuilding.queue[room.match.ruleBuilding.currentIndex], 'p1');
+
+  addRule(room, 'p1', {
+    condition: { count: 2 },
+    effect: 'gift',
+    target: 'next'
+  });
+
+  assert.equal(room.status, 'playing');
+  assert.equal(room.match.currentRound, 2);
+  assert.equal(room.rules.length, 2);
+});
+
+test('最終ラウンド後はMATCH_RESULTになり最終ラウンド順位で同点を解決する', () => {
+  const room = makeRoom({
+    p1: [],
+    p2: []
+  });
+  room.status = 'lobby';
+  room.game = null;
+  room.settings.roundCount = 4;
+
+  startGame(room, 'p1', { rng: () => 0.5 });
+
+  const winners = ['p1', 'p2', 'p1', 'p2'];
+  const ruleRanks = ['7', '8', '9', '10', 'J', 'Q'];
+  let ruleIndex = 0;
+
+  for (let round = 1; round <= 4; round += 1) {
+    const winnerId = winners[round - 1];
+    room.players.find((player) => player.id === 'p1').hand = [card(`a${round}`, '7', 'S')];
+    room.players.find((player) => player.id === 'p2').hand = [card(`b${round}`, '8', 'S')];
+    room.game.currentPlayerId = winnerId;
+
+    playCards(room, winnerId, [winnerId === 'p1' ? `a${round}` : `b${round}`]);
+
+    if (round < 4) {
+      beginRuleBuilding(room, 'p1');
+      const firstBuilder = room.match.ruleBuilding.queue[room.match.ruleBuilding.currentIndex];
+      addRule(room, firstBuilder, {
+        condition: { rank: ruleRanks[ruleIndex] },
+        effect: 'skip',
+        target: 'next'
+      });
+      ruleIndex += 1;
+      const secondBuilder = room.match.ruleBuilding.queue[room.match.ruleBuilding.currentIndex];
+      addRule(room, secondBuilder, {
+        condition: { rank: ruleRanks[ruleIndex] },
+        effect: 'skip',
+        target: 'next'
+      });
+      ruleIndex += 1;
+    }
+  }
+
+  assert.equal(room.status, 'matchResult');
+  assert.equal(room.match.scores.p1, 2);
+  assert.equal(room.match.scores.p2, 2);
+  assert.equal(room.match.finalResults[0].playerId, 'p2');
+  assert.equal(room.match.roundResults.length, 4);
 });
 
 test('ロビーでホストが退出すると次のプレイヤーへホストを移す', () => {

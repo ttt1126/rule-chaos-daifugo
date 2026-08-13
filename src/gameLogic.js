@@ -1,4 +1,4 @@
-const { MODES, RANKS, RANK_VALUES, SUITS } = require('./constants');
+const { MATCH_DEFAULTS, MODES, RANKS, RANK_VALUES, ROUND_COUNTS, SUITS } = require('./constants');
 const {
   createDeck,
   makeId,
@@ -113,6 +113,11 @@ function normalizeHiddenRuleCount(count) {
   return [3, 5, 8, 10].includes(numeric) ? numeric : 5;
 }
 
+function normalizeRoundCount(count) {
+  const numeric = Number(count);
+  return ROUND_COUNTS.includes(numeric) ? numeric : MATCH_DEFAULTS.roundCount;
+}
+
 function updateSettings(room, playerId, settings) {
   if (room.hostId !== playerId) {
     throw new Error('ホストのみ設定できます');
@@ -125,6 +130,7 @@ function updateSettings(room, playerId, settings) {
   room.settings.hiddenRuleCount = normalizeHiddenRuleCount(
     settings.hiddenRuleCount ?? room.settings.hiddenRuleCount
   );
+  room.settings.roundCount = normalizeRoundCount(settings.roundCount ?? room.settings.roundCount);
   addEvent(room, 'ゲーム設定を更新しました', 'system');
 }
 
@@ -133,11 +139,13 @@ function addRule(room, playerId, input, options = {}) {
   if (player?.left) {
     throw new Error('退出したプレイヤーはルールを追加できません');
   }
-  if (!options.system && room.status !== 'lobby' && room.hostId !== playerId) {
-    throw new Error('ゲーム開始後はホストのみルールを追加できます');
-  }
-  if (room.status === 'finished') {
-    throw new Error('終了したゲームにはルールを追加できません');
+  if (!options.system) {
+    if (room.status !== 'ruleBuilding') {
+      throw new Error('特殊ルールはラウンド終了後のルール追加フェーズでのみ追加できます');
+    }
+    if (currentRuleBuilderId(room) !== playerId) {
+      throw new Error('現在はあなたのルール追加ターンではありません');
+    }
   }
 
   const normalized = normalizeRuleInput(input);
@@ -160,9 +168,13 @@ function addRule(room, playerId, input, options = {}) {
   room.rules.push(rule);
 
   if (!rule.secret) {
-    addEvent(room, `特殊ルール追加: ${describeRule(rule)}`, 'rule');
+    addEvent(room, `${player?.name || 'システム'}さんが新しいルールを追加しました: ${describeRule(rule)}`, 'rule');
   } else {
     addEvent(room, '隠しルールを追加しました', 'rule');
+  }
+
+  if (!options.system) {
+    advanceRuleBuilding(room);
   }
 
   return rule;
@@ -185,21 +197,7 @@ function startGame(room, playerId, options = {}) {
 
   const mode = normalizeMode(room.settings.mode);
   const hiddenRuleCount = normalizeHiddenRuleCount(room.settings.hiddenRuleCount);
-  const deck = shuffle(createDeck(), options.rng);
-
-  for (const player of joinedPlayers) {
-    player.hand = [];
-    player.finishedRank = null;
-    player.skipTurns = 0;
-    player.bindingSuit = null;
-  }
-
-  deck.forEach((card, index) => {
-    joinedPlayers[index % joinedPlayers.length].hand.push(card);
-  });
-  for (const player of joinedPlayers) {
-    player.hand = sortHand(player.hand);
-  }
+  const roundCount = normalizeRoundCount(room.settings.roundCount);
 
   if (mode === 'chaos' || mode === 'mystery') {
     const existingSignatures = room.rules.map((rule) => ruleSignature(rule));
@@ -212,14 +210,57 @@ function startGame(room, playerId, options = {}) {
     room.rules.push(...randomRules);
   }
 
+  room.match = {
+    currentRound: 1,
+    totalRounds: roundCount,
+    playerIds: joinedPlayers.map((player) => player.id),
+    scores: Object.fromEntries(joinedPlayers.map((player) => [player.id, 0])),
+    roundResults: [],
+    finalResults: null,
+    ruleBuilding: null,
+    rulesPerPlayerPerRound: MATCH_DEFAULTS.rulesPerPlayerPerRound,
+    ruleAddOrder: MATCH_DEFAULTS.ruleAddOrder
+  };
+
+  addEvent(room, `${MODES[mode].label}モードで${roundCount}ラウンドのマッチを開始しました`, 'system');
+  startRound(room, options);
+}
+
+function startRound(room, options = {}) {
+  if (!room.match) {
+    throw new Error('マッチが開始されていません');
+  }
+
+  const roundPlayers = matchPlayers(room).filter((player) => !player.left);
+  if (roundPlayers.length < 2) {
+    finishMatch(room);
+    return;
+  }
+
+  const deck = shuffle(createDeck(), options.rng);
+  for (const player of room.players) {
+    player.hand = [];
+    player.finishedRank = null;
+    player.skipTurns = 0;
+    player.bindingSuit = null;
+  }
+
+  deck.forEach((card, index) => {
+    roundPlayers[index % roundPlayers.length].hand.push(card);
+  });
+  for (const player of roundPlayers) {
+    player.hand = sortHand(player.hand);
+  }
+
   room.status = 'playing';
   room.game = {
     direction: 1,
-    currentPlayerId: joinedPlayers[0].id,
+    currentPlayerId: roundPlayers[0].id,
     table: null,
     lastPlayBy: null,
     passes: [],
     rankings: [],
+    roundPlayerIds: roundPlayers.map((player) => player.id),
     phase: 'playing',
     pendingAction: null,
     effectQueue: [],
@@ -227,8 +268,232 @@ function startGame(room, playerId, options = {}) {
     forceLeadPlayerId: null,
     turnNumber: 1
   };
+  room.match.ruleBuilding = null;
 
-  addEvent(room, `${MODES[mode].label}モードでゲームを開始しました`, 'system');
+  addEvent(room, `第${room.match.currentRound}/${room.match.totalRounds}ラウンドを開始しました`, 'system');
+}
+
+function matchPlayers(room) {
+  if (!room.match?.playerIds) {
+    return room.players.filter((player) => !player.left);
+  }
+  return room.match.playerIds.map((playerId) => getPlayer(room, playerId)).filter(Boolean);
+}
+
+function currentRoundPlayers(room) {
+  const ids = room.game?.roundPlayerIds || matchPlayers(room).map((player) => player.id);
+  return ids.map((playerId) => getPlayer(room, playerId)).filter(Boolean);
+}
+
+function finishRound(room) {
+  if (!room.match) {
+    return finishLegacyGame(room);
+  }
+
+  const roundPlayers = currentRoundPlayers(room);
+  const rankedIds = [...room.game.rankings];
+  for (const player of roundPlayers) {
+    if (!rankedIds.includes(player.id)) {
+      player.finishedRank = rankedIds.length + 1;
+      rankedIds.push(player.id);
+      addEvent(room, `${player.name}さんが${player.finishedRank}位です`, 'finish');
+    }
+  }
+  room.game.rankings = rankedIds;
+
+  const playerCount = roundPlayers.length;
+  const rankings = rankedIds.map((playerId, index) => {
+    const rank = index + 1;
+    const player = getPlayer(room, playerId);
+    const points = MATCH_DEFAULTS.pointsByRank(playerCount, rank);
+    room.match.scores[playerId] = (room.match.scores[playerId] || 0) + points;
+    return {
+      playerId,
+      name: player?.name || '退出済み',
+      rank,
+      points
+    };
+  });
+
+  const result = {
+    round: room.match.currentRound,
+    rankings,
+    scoresAfter: { ...room.match.scores },
+    finishedAt: Date.now()
+  };
+  room.match.roundResults.push(result);
+
+  clearRoundState(room);
+
+  if (room.match.currentRound >= room.match.totalRounds || matchPlayers(room).filter((player) => !player.left).length < 2) {
+    finishMatch(room);
+    return true;
+  }
+
+  room.status = 'roundResult';
+  room.game.phase = 'roundResult';
+  addEvent(room, `第${result.round}ラウンドが終了しました`, 'system');
+  return true;
+}
+
+function clearRoundState(room) {
+  for (const player of room.players) {
+    player.hand = [];
+    player.skipTurns = 0;
+    player.bindingSuit = null;
+  }
+
+  if (!room.game) return;
+  room.game.currentPlayerId = null;
+  room.game.table = null;
+  room.game.lastPlayBy = null;
+  room.game.passes = [];
+  room.game.pendingAction = null;
+  room.game.effectQueue = [];
+  room.game.resolvingActorId = null;
+  room.game.forceLeadPlayerId = null;
+}
+
+function finishMatch(room) {
+  if (!room.match) {
+    return finishLegacyGame(room);
+  }
+
+  clearRoundState(room);
+  room.status = 'matchResult';
+  room.game = room.game || { phase: 'matchResult', rankings: [] };
+  room.game.phase = 'matchResult';
+  room.game.currentPlayerId = null;
+  room.match.ruleBuilding = null;
+  room.match.finalResults = calculateFinalResults(room);
+  addEvent(room, 'マッチが終了しました', 'system');
+  return true;
+}
+
+function calculateFinalResults(room) {
+  const latestFirst = [...room.match.roundResults].reverse();
+  return matchPlayers(room)
+    .map((player) => ({
+      playerId: player.id,
+      name: player.name,
+      points: room.match.scores[player.id] || 0,
+      roundRanks: room.match.roundResults.map((round) => {
+        const result = round.rankings.find((entry) => entry.playerId === player.id);
+        return result?.rank || null;
+      }),
+      left: Boolean(player.left)
+    }))
+    .sort((a, b) => {
+      const pointDiff = b.points - a.points;
+      if (pointDiff !== 0) return pointDiff;
+
+      for (const round of latestFirst) {
+        const aRank = round.rankings.find((entry) => entry.playerId === a.playerId)?.rank || Number.POSITIVE_INFINITY;
+        const bRank = round.rankings.find((entry) => entry.playerId === b.playerId)?.rank || Number.POSITIVE_INFINITY;
+        if (aRank !== bRank) return aRank - bRank;
+      }
+
+      return a.name.localeCompare(b.name, 'ja');
+    })
+    .map((entry, index) => ({ ...entry, finalRank: index + 1 }));
+}
+
+function beginRuleBuilding(room, playerId) {
+  if (room.hostId !== playerId) {
+    throw new Error('ホストのみ進行できます');
+  }
+  if (room.status !== 'roundResult') {
+    throw new Error('ルール追加フェーズへ進める状態ではありません');
+  }
+  if (!room.match || room.match.currentRound >= room.match.totalRounds) {
+    throw new Error('最終ラウンド後はルール追加フェーズへ進みません');
+  }
+
+  const lastResult = room.match.roundResults.at(-1);
+  const queue = [...lastResult.rankings]
+    .sort((a, b) => b.rank - a.rank)
+    .map((entry) => entry.playerId)
+    .filter((queuedPlayerId) => {
+      const player = getPlayer(room, queuedPlayerId);
+      return player && !player.left;
+    });
+
+  if (queue.length === 0) {
+    startNextRound(room);
+    return;
+  }
+
+  room.status = 'ruleBuilding';
+  room.match.ruleBuilding = {
+    afterRound: room.match.currentRound,
+    queue,
+    currentIndex: 0,
+    addedRules: []
+  };
+  room.game.phase = 'ruleBuilding';
+  addEvent(room, 'ルール追加フェーズを開始しました', 'system');
+}
+
+function currentRuleBuilderId(room) {
+  const ruleBuilding = room.match?.ruleBuilding;
+  if (!ruleBuilding) return null;
+  return ruleBuilding.queue[ruleBuilding.currentIndex] || null;
+}
+
+function advanceRuleBuilding(room) {
+  const ruleBuilding = room.match?.ruleBuilding;
+  if (!ruleBuilding) {
+    return;
+  }
+
+  const currentPlayerId = currentRuleBuilderId(room);
+  if (currentPlayerId) {
+    ruleBuilding.addedRules.push({ playerId: currentPlayerId, at: Date.now() });
+  }
+
+  ruleBuilding.currentIndex += 1;
+  while (ruleBuilding.currentIndex < ruleBuilding.queue.length) {
+    const nextPlayer = getPlayer(room, ruleBuilding.queue[ruleBuilding.currentIndex]);
+    if (nextPlayer && !nextPlayer.left) {
+      addEvent(room, `${nextPlayer.name}さんのルール追加ターンです`, 'system');
+      return;
+    }
+    ruleBuilding.currentIndex += 1;
+  }
+
+  startNextRound(room);
+}
+
+function startNextRound(room) {
+  if (!room.match) {
+    throw new Error('マッチが開始されていません');
+  }
+
+  room.match.currentRound += 1;
+  startRound(room);
+}
+
+function restartMatch(room, playerId) {
+  if (room.hostId !== playerId) {
+    throw new Error('ホストのみ再戦できます');
+  }
+  if (room.status !== 'matchResult') {
+    throw new Error('マッチ終了後のみ再戦できます');
+  }
+
+  for (const player of room.players) {
+    if (player.left) continue;
+    player.hand = [];
+    player.finishedRank = null;
+    player.skipTurns = 0;
+    player.bindingSuit = null;
+  }
+
+  room.rules = [];
+  room.match = null;
+  room.game = null;
+  room.status = 'lobby';
+  addEvent(room, '再戦のためロビーへ戻りました', 'system');
 }
 
 function analyzePlay(room, player, cardIds) {
@@ -657,6 +922,10 @@ function finishGameIfReady(room) {
     addEvent(room, `${last.name}さんが${last.finishedRank}位です`, 'finish');
   }
 
+  return finishRound(room);
+}
+
+function finishLegacyGame(room) {
   room.status = 'finished';
   room.game.currentPlayerId = null;
   room.game.phase = 'finished';
@@ -770,6 +1039,12 @@ function leavePlayer(room, playerId) {
 
   if (room.status === 'playing') {
     handlePlayingLeave(room, playerId);
+  } else if (room.status === 'ruleBuilding') {
+    handleRuleBuildingLeave(room, playerId);
+  } else if (room.status === 'roundResult') {
+    if (matchPlayers(room).filter((candidate) => !candidate.left).length < 2) {
+      finishMatch(room);
+    }
   }
 
   return { roomClosed: room.players.every((candidate) => candidate.left) };
@@ -826,10 +1101,27 @@ function handlePlayingLeave(room, playerId) {
   }
 }
 
+function handleRuleBuildingLeave(room, playerId) {
+  const ruleBuilding = room.match?.ruleBuilding;
+  if (!ruleBuilding) return;
+
+  ruleBuilding.queue = ruleBuilding.queue.filter((queuedPlayerId) => queuedPlayerId !== playerId);
+  if (ruleBuilding.currentIndex >= ruleBuilding.queue.length) {
+    startNextRound(room);
+    return;
+  }
+
+  const current = getPlayer(room, ruleBuilding.queue[ruleBuilding.currentIndex]);
+  if (current) {
+    addEvent(room, `${current.name}さんのルール追加ターンです`, 'system');
+  }
+}
+
 module.exports = {
   addEvent,
   addRule,
   analyzePlay,
+  beginRuleBuilding,
   chooseTarget,
   chooseTransferCard,
   directionLabel,
@@ -839,6 +1131,8 @@ module.exports = {
   nextActivePlayerId,
   passTurn,
   playCards,
+  restartMatch,
+  startRound,
   startGame,
   updateSettings
 };

@@ -91,6 +91,16 @@ const MODES = {
 };
 
 const HIDDEN_RULE_COUNTS = [3, 5, 8, 10];
+const ROUND_COUNTS = [3, 4, 5];
+
+const MATCH_DEFAULTS = {
+  roundCount: 4,
+  rulesPerPlayerPerRound: 1,
+  ruleAddOrder: 'lowestToHighest',
+  pointsByRank(playerCount, rank) {
+    return Math.max(0, playerCount - rank);
+  }
+};
 
 module.exports = {
   CONDITION_POWER,
@@ -98,9 +108,11 @@ module.exports = {
   CONNECTORS,
   EFFECTS,
   HIDDEN_RULE_COUNTS,
+  MATCH_DEFAULTS,
   MODES,
   RANKS,
   RANK_VALUES,
+  ROUND_COUNTS,
   SUITS,
   SUIT_LABELS,
   SUIT_ORDER,

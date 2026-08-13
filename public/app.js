@@ -134,8 +134,8 @@ document.addEventListener('click', (event) => {
     leaveLocalRoom('');
   }
   if (action === 'leave') {
-    const isPlaying = roomState?.status === 'playing';
-    if (isPlaying && !window.confirm('途中退出するとこのゲームには戻れません。退出しますか？')) {
+    const isInMatch = roomState && !['lobby', 'matchResult', 'finished'].includes(roomState.status);
+    if (isInMatch && !window.confirm('途中退出するとこのゲームには戻れません。退出しますか？')) {
       return;
     }
     emitAuthed('leaveRoom', {}, () => {
@@ -144,6 +144,12 @@ document.addEventListener('click', (event) => {
   }
   if (action === 'start') {
     emitAuthed('startGame', {});
+  }
+  if (action === 'begin-rule-building') {
+    emitAuthed('beginRuleBuilding', {});
+  }
+  if (action === 'restart-match') {
+    emitAuthed('restartMatch', {});
   }
   if (action === 'set-rule-target') {
     if (button.dataset.disabled === 'true') {
@@ -210,7 +216,8 @@ document.addEventListener('change', (event) => {
   if (field.dataset.setting && roomState?.isHost) {
     const settings = {
       mode: roomState.settings.mode,
-      hiddenRuleCount: roomState.settings.hiddenRuleCount
+      hiddenRuleCount: roomState.settings.hiddenRuleCount,
+      roundCount: roomState.settings.roundCount
     };
     settings[field.dataset.setting] = field.value;
     emitAuthed('updateSettings', { settings });
@@ -232,6 +239,8 @@ document.addEventListener('click', (event) => {
       target: ruleDraft.target,
       effect: ruleDraft.effect
     }
+  }, () => {
+    resetRuleDraft();
   });
 });
 
@@ -373,6 +382,18 @@ function renderRoom() {
   if (roomState.status === 'lobby') {
     return renderLobby();
   }
+  if (roomState.status === 'playing') {
+    return renderGame();
+  }
+  if (roomState.status === 'roundResult') {
+    return renderRoundResultPhase();
+  }
+  if (roomState.status === 'ruleBuilding') {
+    return renderRuleBuildingPhase();
+  }
+  if (roomState.status === 'matchResult' || roomState.status === 'finished') {
+    return renderMatchResultPhase();
+  }
   return renderGame();
 }
 
@@ -382,7 +403,6 @@ function renderLobby() {
       <strong>待機中</strong>
       <span>${roomState.players.length}/4人参加中</span>
     </section>
-    ${renderRuleBuilder()}
     <section class="content-grid">
       <div class="main-column">
         ${renderPlayers()}
@@ -399,9 +419,9 @@ function renderLobby() {
 function renderGame() {
   return `
     ${renderTurnBanner()}
-    ${roomState.isHost && roomState.status === 'playing' ? renderRuleBuilder() : ''}
     <section class="content-grid">
       <div class="main-column">
+        ${renderMatchSummary()}
         ${renderTable()}
         ${renderPendingAction()}
         ${renderHand()}
@@ -415,8 +435,178 @@ function renderGame() {
   `;
 }
 
+function renderRoundResultPhase() {
+  const match = roomState.match;
+  const latest = match?.latestRoundResult;
+  return `
+    <section class="status-banner finished">
+      <strong>第${latest?.round || match?.currentRound || ''}ラウンド終了</strong>
+      <span>結果を確認してからルール追加フェーズへ進みます</span>
+    </section>
+    <section class="content-grid">
+      <div class="main-column">
+        ${renderRoundResult(latest)}
+        ${renderScoreBoard()}
+        ${
+          roomState.isHost
+            ? '<button class="primary" data-click="begin-rule-building" type="button">ルール追加フェーズへ</button>'
+            : '<section class="panel"><h2>ホストの進行待ちです</h2></section>'
+        }
+      </div>
+      <aside class="side-column">
+        ${renderPlayers()}
+        ${renderRules()}
+        ${renderEvents()}
+      </aside>
+    </section>
+  `;
+}
+
+function renderRuleBuildingPhase() {
+  const builder = roomState.match?.ruleBuilding;
+  const builderName = builder?.currentPlayerName || '';
+  return `
+    <section class="status-banner pending">
+      <strong>第${builder?.afterRound || ''}ラウンド後のルール追加フェーズ</strong>
+      <span>${escapeHtml(builderName)}さんがルールを作成中です</span>
+    </section>
+    <section class="content-grid">
+      <div class="main-column">
+        ${
+          builder?.isYourTurn
+            ? renderRuleBuilder()
+            : `<section class="panel">
+                <h2>ルール追加待ち</h2>
+                <p>${escapeHtml(builderName)}さんの追加完了を待っています。</p>
+              </section>`
+        }
+        ${renderScoreBoard()}
+      </div>
+      <aside class="side-column">
+        ${renderPlayers()}
+        ${renderRules()}
+        ${renderEvents()}
+      </aside>
+    </section>
+  `;
+}
+
+function renderMatchResultPhase() {
+  return `
+    <section class="status-banner finished">
+      <strong>マッチ終了</strong>
+      <span>${escapeHtml(roomState.match?.totalRounds || '')}ラウンドの最終結果です</span>
+    </section>
+    <section class="content-grid">
+      <div class="main-column">
+        ${renderFinalResults()}
+        ${renderScoreBoard()}
+        ${roomState.isHost ? '<button class="primary" data-click="restart-match" type="button">もう一度遊ぶ</button>' : ''}
+      </div>
+      <aside class="side-column">
+        ${renderRules()}
+        ${renderEvents()}
+      </aside>
+    </section>
+  `;
+}
+
+function renderMatchSummary() {
+  const match = roomState.match;
+  if (!match) return '';
+  return `
+    <section class="panel compact-panel">
+      <div class="table-header">
+        <h2>第${match.currentRound}/${match.totalRounds}ラウンド</h2>
+        <span>累積ポイント</span>
+      </div>
+      ${renderScoreRows(true)}
+    </section>
+  `;
+}
+
+function renderScoreBoard() {
+  return `
+    <section class="panel">
+      <h2>累積ポイント</h2>
+      ${renderScoreRows(false)}
+    </section>
+  `;
+}
+
+function renderScoreRows(compact) {
+  const players = [...roomState.players].sort((a, b) => {
+    const scoreDiff = (b.score || 0) - (a.score || 0);
+    if (scoreDiff !== 0) return scoreDiff;
+    return a.name.localeCompare(b.name, 'ja');
+  });
+
+  return `
+    <div class="score-list ${compact ? 'compact' : ''}">
+      ${players
+        .map(
+          (player) => `
+            <div class="score-row">
+              <strong>${escapeHtml(player.name)}${player.isYou ? '（あなた）' : ''}</strong>
+              <span>${player.score || 0}pt</span>
+              <small>${formatRoundRanks(player.roundRanks)}</small>
+            </div>
+          `
+        )
+        .join('')}
+    </div>
+  `;
+}
+
+function renderRoundResult(result) {
+  if (!result) {
+    return '<section class="panel"><h2>ラウンド結果</h2><p class="muted">結果がありません</p></section>';
+  }
+
+  return `
+    <section class="panel">
+      <h2>第${result.round}ラウンド結果</h2>
+      <div class="result-list">
+        ${result.rankings
+          .map(
+            (entry) => `
+              <div class="result-row">
+                <strong>${entry.rank}位：${escapeHtml(entry.name)}</strong>
+                <span>+${entry.points}pt</span>
+              </div>
+            `
+          )
+          .join('')}
+      </div>
+    </section>
+  `;
+}
+
+function renderFinalResults() {
+  const finalResults = roomState.match?.finalResults || [];
+  return `
+    <section class="panel">
+      <h2>最終結果</h2>
+      <div class="result-list final">
+        ${finalResults
+          .map(
+            (entry) => `
+              <div class="result-row">
+                <strong>${entry.finalRank}位：${escapeHtml(entry.name)}</strong>
+                <span>${entry.points}pt</span>
+                <small>${formatRoundRanks(entry.roundRanks)}</small>
+              </div>
+            `
+          )
+          .join('')}
+      </div>
+    </section>
+  `;
+}
+
 function renderTurnBanner() {
   const game = roomState.game;
+  const roundLabel = roomState.match ? `第${roomState.match.currentRound}/${roomState.match.totalRounds}ラウンド` : '';
   if (roomState.status === 'finished') {
     return `<section class="status-banner finished"><strong>ゲーム終了</strong><span>順位が確定しました</span></section>`;
   }
@@ -434,11 +624,11 @@ function renderTurnBanner() {
     )}</span></section>`;
   }
   if (game.isYourTurn) {
-    return `<section class="status-banner your-turn"><strong>あなたのターンです</strong><span>カードを選んで出すか、パスできます</span></section>`;
+    return `<section class="status-banner your-turn"><strong>あなたのターンです</strong><span>${escapeHtml(roundLabel)} / カードを選んで出すか、パスできます</span></section>`;
   }
   return `<section class="status-banner"><strong>${escapeHtml(
     game.currentPlayerName || ''
-  )}さんのターン</strong><span>${escapeHtml(game.directionLabel)}</span></section>`;
+  )}さんのターン</strong><span>${escapeHtml(`${roundLabel} / ${game.directionLabel}`)}</span></section>`;
 }
 
 function renderPlayers() {
@@ -457,6 +647,7 @@ function renderPlayers() {
                   <div class="player-meta">
                     ${player.isHost ? '<span>ホスト</span>' : ''}
                     <span>${player.left ? '退出' : player.connected ? '接続中' : '切断中'}</span>
+                    ${roomState.match ? `<span>${player.score || 0}pt</span>` : ''}
                     ${player.finishedRank ? `<span>${player.finishedRank}位</span>` : ''}
                     ${player.skipTurns ? `<span>スキップ ${player.skipTurns}</span>` : ''}
                     ${player.bindingSuit ? `<span>縛り ${player.bindingSuitLabel}</span>` : ''}
@@ -489,6 +680,12 @@ function renderHostSettings() {
           ランダムルール数
           <select data-setting="hiddenRuleCount">
             ${[3, 5, 8, 10].map((count) => option(String(count), `${count}個`, String(roomState.settings.hiddenRuleCount))).join('')}
+          </select>
+        </label>
+        <label>
+          ラウンド数
+          <select data-setting="roundCount">
+            ${[3, 4, 5].map((count) => option(String(count), `${count}ラウンド`, String(roomState.settings.roundCount || 4))).join('')}
           </select>
         </label>
       </div>
@@ -1059,6 +1256,21 @@ function pendingLabel(pending) {
   if (pending.type === 'target') return '対象プレイヤーを選んでください';
   if (pending.type === 'giftCard') return '渡すカードを1枚選んでください';
   return '選択してください';
+}
+
+function formatRoundRanks(ranks) {
+  const playedRanks = (ranks || []).filter(Boolean);
+  if (playedRanks.length === 0) return '順位履歴なし';
+  return playedRanks.map((rank) => `${rank}位`).join(' / ');
+}
+
+function resetRuleDraft() {
+  ruleDraft = {
+    condition: { rank: '', suit: '', count: '' },
+    target: 'next',
+    effect: 'skip'
+  };
+  normalizeRuleDraftTarget();
 }
 
 function option(value, label, selected) {

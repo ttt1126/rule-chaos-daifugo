@@ -364,6 +364,51 @@ form,
   border-color: var(--gold);
 }
 
+.compact-panel {
+  padding-block: 12px;
+}
+
+.score-list,
+.result-list {
+  display: grid;
+  gap: 8px;
+}
+
+.score-list.compact {
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+}
+
+.score-row,
+.result-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 6px 10px;
+  align-items: center;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fbfcf8;
+  padding: 9px 10px;
+}
+
+.score-row span,
+.result-row span {
+  color: var(--blue);
+  font-weight: 900;
+  white-space: nowrap;
+}
+
+.score-row small,
+.result-row small {
+  grid-column: 1 / -1;
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.result-list.final .result-row:first-child {
+  border-color: var(--gold);
+  box-shadow: inset 4px 0 0 var(--gold);
+}
+
 .button-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));

@@ -110,6 +110,24 @@ function registerSocketHandlers(io, manager) {
       });
     });
 
+    socket.on('beginRuleBuilding', (payload, ack) => {
+      handle(socket, ack, () => {
+        const { room, playerId } = requireSocketRoom(socket, payload);
+        manager.beginRuleBuilding(room, playerId);
+        emitRoomState(room);
+        return {};
+      });
+    });
+
+    socket.on('restartMatch', (payload, ack) => {
+      handle(socket, ack, () => {
+        const { room, playerId } = requireSocketRoom(socket, payload);
+        manager.restartMatch(room, playerId);
+        emitRoomState(room);
+        return {};
+      });
+    });
+
     socket.on('playCards', (payload, ack) => {
       handle(socket, ack, () => {
         const { room, playerId } = requireSocketRoom(socket, payload);

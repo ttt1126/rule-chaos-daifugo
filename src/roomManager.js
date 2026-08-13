@@ -5,6 +5,7 @@ const { calculateConditionPower, describeRule, targetConnector, validTargetsForE
 const {
   addEvent,
   addRule,
+  beginRuleBuilding,
   chooseTarget,
   chooseTransferCard,
   directionLabel,
@@ -12,6 +13,7 @@ const {
   leavePlayer,
   passTurn,
   playCards,
+  restartMatch,
   startGame,
   updateSettings
 } = require('./gameLogic');
@@ -33,12 +35,14 @@ function createRoomManager() {
       status: 'lobby',
       settings: {
         mode: 'normal',
-        hiddenRuleCount: 5
+        hiddenRuleCount: 5,
+        roundCount: 4
       },
       players: [player],
       rules: [],
       events: [],
       game: null,
+      match: null,
       createdAt: Date.now(),
       updatedAt: Date.now()
     };
@@ -125,7 +129,8 @@ function createRoomManager() {
       settings: {
         mode: room.settings.mode,
         modeLabel: MODES[room.settings.mode]?.label || room.settings.mode,
-        hiddenRuleCount: room.settings.hiddenRuleCount
+        hiddenRuleCount: room.settings.hiddenRuleCount,
+        roundCount: room.settings.roundCount
       },
       players: room.players.map((player) => ({
         id: player.id,
@@ -139,6 +144,11 @@ function createRoomManager() {
         cardCount: player.left ? 0 : player.hand.length,
         hand: player.id === viewerId && !player.left ? sortHand(player.hand).map(publicCard) : null,
         finishedRank: player.finishedRank,
+        score: room.match?.scores?.[player.id] || 0,
+        roundRanks: room.match?.roundResults?.map((round) => {
+          const result = round.rankings.find((entry) => entry.playerId === player.id);
+          return result?.rank || null;
+        }) || [],
         skipTurns: player.skipTurns,
         bindingSuit: player.bindingSuit,
         bindingSuitLabel: player.bindingSuit ? SUIT_SYMBOLS[player.bindingSuit] : null
@@ -167,6 +177,7 @@ function createRoomManager() {
             pendingAction
           }
         : null,
+      match: getPublicMatchState(room, viewerId),
       rules: room.rules.map((rule) => ({
         id: rule.id,
         hidden: rule.secret && !rule.revealed,
@@ -202,6 +213,7 @@ function createRoomManager() {
     getPublicState,
     requireRoom,
     addRule: (room, playerId, input) => dispatch(room, () => addRule(room, playerId, input)),
+    beginRuleBuilding: (room, playerId) => dispatch(room, () => beginRuleBuilding(room, playerId)),
     chooseTarget: (room, playerId, pendingId, targetPlayerId) =>
       dispatch(room, () => chooseTarget(room, playerId, pendingId, targetPlayerId)),
     chooseTransferCard: (room, playerId, pendingId, cardId) =>
@@ -221,6 +233,7 @@ function createRoomManager() {
     },
     passTurn: (room, playerId) => dispatch(room, () => passTurn(room, playerId)),
     playCards: (room, playerId, cardIds) => dispatch(room, () => playCards(room, playerId, cardIds)),
+    restartMatch: (room, playerId) => dispatch(room, () => restartMatch(room, playerId)),
     startGame: (room, playerId) => dispatch(room, () => startGame(room, playerId)),
     updateSettings: (room, playerId, settings) =>
       dispatch(room, () => updateSettings(room, playerId, settings))
@@ -243,6 +256,37 @@ function validTargetsByEffect() {
       validTargetsForEffect(effect)
     ])
   );
+}
+
+function getPublicMatchState(room, viewerId) {
+  if (!room.match) return null;
+
+  const currentBuilderId = room.match.ruleBuilding
+    ? room.match.ruleBuilding.queue[room.match.ruleBuilding.currentIndex] || null
+    : null;
+  const currentBuilder = currentBuilderId
+    ? room.players.find((player) => player.id === currentBuilderId)
+    : null;
+
+  return {
+    currentRound: room.match.currentRound,
+    totalRounds: room.match.totalRounds,
+    scores: { ...room.match.scores },
+    roundResults: room.match.roundResults,
+    latestRoundResult: room.match.roundResults.at(-1) || null,
+    finalResults: room.match.finalResults,
+    ruleBuilding: room.match.ruleBuilding
+      ? {
+          afterRound: room.match.ruleBuilding.afterRound,
+          queue: room.match.ruleBuilding.queue,
+          currentIndex: room.match.ruleBuilding.currentIndex,
+          currentPlayerId: currentBuilderId,
+          currentPlayerName: currentBuilder?.name || null,
+          isYourTurn: currentBuilderId === viewerId,
+          remainingCount: Math.max(0, room.match.ruleBuilding.queue.length - room.match.ruleBuilding.currentIndex)
+        }
+      : null
+  };
 }
 
 function getViewerPendingAction(room, viewerId) {
