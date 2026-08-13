@@ -253,10 +253,14 @@ function startRound(room, options = {}) {
     player.hand = sortHand(player.hand);
   }
 
+  const leaderIndex = (room.match.currentRound - 1) % roundPlayers.length;
+  const roundLeader = roundPlayers[leaderIndex];
+
   room.status = 'playing';
   room.game = {
     direction: 1,
-    currentPlayerId: roundPlayers[0].id,
+    currentPlayerId: roundLeader.id,
+    roundLeaderId: roundLeader.id,
     table: null,
     lastPlayBy: null,
     passes: [],
@@ -273,7 +277,11 @@ function startRound(room, options = {}) {
   };
   room.match.ruleBuilding = null;
 
-  addEvent(room, `第${room.match.currentRound}/${room.match.totalRounds}ラウンドを開始しました`, 'system');
+  addEvent(
+    room,
+    `第${room.match.currentRound}/${room.match.totalRounds}ラウンドを開始しました。親は${roundLeader.name}さんです`,
+    'system'
+  );
 }
 
 function matchPlayers(room) {
@@ -349,6 +357,7 @@ function clearRoundState(room) {
 
   if (!room.game) return;
   room.game.currentPlayerId = null;
+  room.game.roundLeaderId = null;
   room.game.table = null;
   room.game.lastPlayBy = null;
   room.game.passes = [];
@@ -502,6 +511,36 @@ function restartMatch(room, playerId) {
   addEvent(room, '再戦のためロビーへ戻りました', 'system');
 }
 
+function endGame(room, playerId) {
+  if (room.hostId !== playerId) {
+    throw new Error('ホストのみゲームを終了できます');
+  }
+  if (room.status === 'lobby') {
+    throw new Error('すでにロビーです');
+  }
+
+  room.players = room.players.filter((player) => !player.left);
+  if (!room.players.some((player) => player.id === room.hostId)) {
+    room.hostId = room.players[0]?.id || null;
+  }
+
+  for (const player of room.players) {
+    player.hand = [];
+    player.finishedRank = null;
+    player.skipTurns = 0;
+    player.bindingSuit = null;
+    player.bindings = [];
+    player.left = false;
+  }
+
+  room.rules = [];
+  room.events = [];
+  room.match = null;
+  room.game = null;
+  room.status = 'lobby';
+  addEvent(room, 'ホストがゲームを終了し、ロビーへ戻りました', 'system');
+}
+
 function analyzePlay(room, player, cardIds) {
   const cards = pickCardsFromHand(player.hand, cardIds);
   if (cards.length < 1 || cards.length > 4) {
@@ -516,16 +555,15 @@ function analyzePlay(room, player, cardIds) {
   }
 
   const table = room.game.table;
-  let effectiveRank;
-  if (printedRanks.length === 1) {
-    effectiveRank = printedRanks[0];
-  } else if (table) {
-    effectiveRank = RANKS.find((rank) => RANK_VALUES[rank] > table.rankValue);
-    if (!effectiveRank) {
-      throw new Error('場より強い数字として使えるジョーカー指定がありません');
+  let effectiveRank = null;
+  const jokerOnly = nonJokers.length === 0;
+  if (jokerOnly) {
+    if (![1, 2].includes(cards.length)) {
+      throw new Error('JOKERだけで出せるのは1枚または2枚です');
     }
+    effectiveRank = 'JOKER';
   } else {
-    effectiveRank = '2';
+    effectiveRank = printedRanks[0];
   }
 
   const rankValue = RANK_VALUES[effectiveRank];
@@ -538,17 +576,9 @@ function analyzePlay(room, player, cardIds) {
     }
   }
 
-  const ruleRanks = new Set(printedRanks);
-  if (hasJoker) {
-    ruleRanks.add(effectiveRank);
-  }
+  const ruleRanks = jokerOnly ? new Set() : new Set([effectiveRank]);
 
   const ruleSuits = new Set(nonJokers.map((card) => card.suit));
-  if (hasJoker) {
-    for (const suit of SUITS) {
-      ruleSuits.add(suit.id);
-    }
-  }
   const playedSuits = new Set(nonJokers.map((card) => card.suit));
   const previousSuits = table
     ? new Set(table.ruleSuits || table.cards?.flatMap((card) => (card.joker ? SUITS.map((suit) => suit.id) : [card.suit])) || [])
@@ -572,7 +602,7 @@ function analyzePlay(room, player, cardIds) {
 }
 
 function cardsContainSuit(cards, suit) {
-  return cards.some((card) => card.joker || card.suit === suit);
+  return cards.some((card) => !card.joker && card.suit === suit);
 }
 
 function cardsContainAnySuit(cards, suits) {
@@ -724,6 +754,9 @@ function bindingRanksLabel(ranks = []) {
 }
 
 function bindingLabel(binding) {
+  if (!binding) {
+    return '縛り';
+  }
   if (binding.type === 'suit') {
     return `スート縛り: ${bindingSuitsLabel(binding.suits)}`;
   }
@@ -802,7 +835,7 @@ function recoverFromEmptyTablePassLoop(room) {
 function bindingForEffect(effect, play) {
   if (effect === 'bindSuit') {
     const suits = [...play.playedSuits];
-    return { type: 'suit', suits: suits.length > 0 ? suits : [SUITS[0].id] };
+    return suits.length > 0 ? { type: 'suit', suits } : null;
   }
   if (effect === 'bindRank') {
     return { type: 'rank', ranks: [play.effectiveRank] };
@@ -1075,6 +1108,10 @@ function applyEffect(room, effectAction, targets) {
 
   if (['bindSuit', 'bindRank', 'bindStep'].includes(effectAction.effect)) {
     const binding = effectAction.binding;
+    if (!binding) {
+      addEvent(room, `${effectLabel(room, effectAction)}: 縛れる内容がないため不発になりました`, 'rule');
+      return 'done';
+    }
     for (const target of targets) {
       target.bindings = [...activeBindings(target), binding].filter(Boolean);
       target.bindingSuit = target.bindings.find((candidate) => candidate.type === 'suit')?.suits?.[0] || null;
@@ -1114,9 +1151,10 @@ function applyEffect(room, effectAction, targets) {
       actorId: actor.id,
       ruleId: effectAction.ruleId,
       effect: effectAction.effect,
-      targetPlayerId: targets[0].id
+      targetPlayerId: targets[0].id,
+      requiredCount: 1
     };
-    addEvent(room, `${actor.name}さんが渡すカードを選択中です`, 'rule');
+    addEvent(room, `${effectLabel(room, effectAction)}: ${actor.name}さんが渡すカードを選択中です`, 'rule');
     return 'pending';
   }
 
@@ -1151,6 +1189,11 @@ function completeResolvedAction(room) {
     game.forceLeadPlayerId = null;
     game.resolvingActorId = null;
     setCurrentPlayerWithSkips(room, leadId);
+    return;
+  }
+
+  if (tryAutoClearTable(room)) {
+    game.resolvingActorId = null;
     return;
   }
 
@@ -1236,16 +1279,24 @@ function shouldClearBecauseAllOthersPassed(room) {
   return challengers.every((player) => game.passes.includes(player.id));
 }
 
-function clearTableAfterPasses(room) {
+function shouldAutoClearTable(room) {
   const game = room.game;
-  const leaderBaseId = game.lastPlayBy;
+  if (!game.table || !game.lastPlayBy) return false;
+
+  const challengers = activePlayers(room).filter((player) => player.id !== game.lastPlayBy);
+  if (challengers.length === 0) return true;
+  return challengers.every((player) => !hasLegalPlay(room, player));
+}
+
+function clearTableForLeader(room, leaderBaseId, message) {
+  const game = room.game;
   const leader = leaderBaseId ? getPlayer(room, leaderBaseId) : null;
   game.table = null;
   game.lastPlayBy = null;
   game.passes = [];
   resetEmptyTablePasses(game);
 
-  addEvent(room, '自分以外の全員がパスしたため、場が流れました', 'system');
+  addEvent(room, message, 'system');
 
   if (finishGameIfReady(room)) {
     return;
@@ -1253,6 +1304,18 @@ function clearTableAfterPasses(room) {
 
   const leadId = leader && !leader.finishedRank ? leader.id : nextActivePlayerId(room, leaderBaseId);
   setCurrentPlayerWithSkips(room, leadId);
+}
+
+function clearTableAfterPasses(room) {
+  clearTableForLeader(room, room.game.lastPlayBy, '自分以外の全員がパスしたため、場が流れました');
+}
+
+function tryAutoClearTable(room) {
+  if (!shouldAutoClearTable(room)) {
+    return false;
+  }
+  clearTableForLeader(room, room.game.lastPlayBy, '誰も場を上回れる手がないため、自動で場が流れました');
+  return true;
 }
 
 function directionLabel(room) {
@@ -1395,6 +1458,7 @@ module.exports = {
   chooseTarget,
   chooseTransferCard,
   directionLabel,
+  endGame,
   getTurnAvailability,
   getPlayer,
   isGamePaused,

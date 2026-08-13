@@ -151,6 +151,57 @@ h2 {
   font-weight: 700;
 }
 
+.rule-notice {
+  position: sticky;
+  top: max(8px, env(safe-area-inset-top));
+  z-index: 10;
+  display: grid;
+  gap: 6px;
+  margin-bottom: 12px;
+  border: 1px solid #8fc6b7;
+  border-radius: 8px;
+  background: #dff1eb;
+  box-shadow: var(--shadow);
+  padding: 12px 14px;
+  color: var(--accent-strong);
+}
+
+.rule-notice ul {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding-left: 18px;
+}
+
+.rules-help {
+  margin-bottom: 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  box-shadow: var(--shadow);
+  padding: 14px;
+}
+
+.help-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 14px;
+}
+
+.help-grid h3 {
+  margin: 0 0 8px;
+  font-size: 0.95rem;
+}
+
+.help-grid ul {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding-left: 20px;
+  color: var(--muted);
+  line-height: 1.45;
+}
+
 .entrance-grid,
 .content-grid {
   display: grid;
@@ -283,6 +334,7 @@ form,
 .player-row.turn {
   border-color: var(--accent);
   box-shadow: inset 4px 0 0 var(--accent);
+  background: #eef8f3;
 }
 
 .player-row.you {
@@ -311,6 +363,20 @@ form,
   white-space: nowrap;
 }
 
+.spectator-hand {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(34px, 1fr));
+  gap: 4px;
+  margin-top: 8px;
+  max-width: 260px;
+}
+
+.spectator-hand .card-face {
+  min-height: 44px;
+  border-radius: 6px;
+  font-size: 0.74rem;
+}
+
 .table-header,
 .hand-header {
   display: flex;
@@ -335,6 +401,13 @@ form,
 
 .hand-grid.compact {
   grid-template-columns: repeat(auto-fill, minmax(64px, 1fr));
+}
+
+.your-turn-hand {
+  border-color: #8fc6b7;
+  box-shadow:
+    inset 0 0 0 2px rgba(18, 106, 93, 0.12),
+    var(--shadow);
 }
 
 .turn-constraint-notice {
@@ -411,6 +484,12 @@ form,
 
 .pending-panel {
   border-color: var(--gold);
+}
+
+.selection-counter {
+  margin-bottom: 10px;
+  color: var(--accent-strong);
+  font-weight: 900;
 }
 
 .compact-panel {
@@ -745,6 +824,12 @@ form,
 
 .hidden-rule {
   color: var(--muted);
+}
+
+.rule-row.trigger-preview {
+  border-color: var(--gold);
+  background: #fff7e8;
+  box-shadow: inset 4px 0 0 var(--gold);
 }
 
 .event-list {

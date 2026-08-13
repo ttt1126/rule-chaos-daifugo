@@ -128,6 +128,15 @@ function registerSocketHandlers(io, manager) {
       });
     });
 
+    socket.on('endGame', (payload, ack) => {
+      handle(socket, ack, () => {
+        const { room, playerId } = requireSocketRoom(socket, payload);
+        manager.endGame(room, playerId);
+        emitRoomState(room);
+        return {};
+      });
+    });
+
     socket.on('playCards', (payload, ack) => {
       handle(socket, ack, () => {
         const { room, playerId } = requireSocketRoom(socket, payload);

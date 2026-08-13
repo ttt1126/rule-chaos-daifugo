@@ -6,12 +6,15 @@ const {
   beginRuleBuilding,
   chooseTarget,
   chooseTransferCard,
+  endGame,
   getTurnAvailability,
   leavePlayer,
   passTurn,
   playCards,
+  startRound,
   startGame
 } = require('../src/gameLogic');
+const { createRoomManager } = require('../src/roomManager');
 const {
   calculateConditionPower,
   conditionUnlocksTarget,
@@ -77,7 +80,7 @@ test('conditionPowerは条件から計算され、最大4で止まる', () => {
   assert.equal(calculateConditionPower({ count: 3 }), 3);
   assert.equal(calculateConditionPower({ count: 4 }), 4);
   assert.equal(calculateConditionPower({ rank: '7' }), 2);
-  assert.equal(calculateConditionPower({ suit: 'S' }), 2);
+  assert.equal(calculateConditionPower({ suit: 'S' }), 1);
   assert.equal(calculateConditionPower({ rank: 'JOKER' }), 3);
   assert.equal(calculateConditionPower({ rankRelation: 'plusOne' }), 2);
   assert.equal(calculateConditionPower({ suitRelation: 'same' }), 2);
@@ -91,7 +94,8 @@ test('conditionPowerに応じて対象コネクタが解放される', () => {
   assert.equal(conditionUnlocksTarget({ count: 2 }, 'any'), false);
   assert.equal(conditionUnlocksTarget({ rank: '7', count: 1 }, 'any'), true);
   assert.equal(conditionUnlocksTarget({ rank: '7', count: 1 }, 'all'), false);
-  assert.equal(conditionUnlocksTarget({ rank: '7', suit: 'S' }, 'all'), true);
+  assert.equal(conditionUnlocksTarget({ rank: '7', suit: 'S' }, 'all'), false);
+  assert.equal(conditionUnlocksTarget({ rank: '7', suit: 'S', count: 1 }, 'all'), true);
 });
 
 test('効果と対象属性の互換性を判定できる', () => {
@@ -123,7 +127,11 @@ test('4段コネクタの成立と不成立をサーバー側で検証する', (
     normalizeRuleInput({ condition: { rank: '7', count: 1 }, target: 'any', effect: 'skip' })
   );
   assert.doesNotThrow(() =>
-    normalizeRuleInput({ condition: { rank: '7', suit: 'S' }, target: 'none', effect: 'clear' })
+    normalizeRuleInput({ condition: { rank: '7', suit: 'S', count: 1 }, target: 'none', effect: 'clear' })
+  );
+  assert.throws(
+    () => normalizeRuleInput({ condition: { rank: 'JOKER', suit: 'S' }, target: 'next', effect: 'skip' }),
+    /JOKER条件/
   );
   assert.throws(() => normalizeRuleInput({ condition: { count: 4 }, target: 'self', effect: 'gift' }), /対象にできません/);
   assert.throws(() => normalizeRuleInput({ condition: { count: 4 }, target: 'all', effect: 'skip' }), /対象にできません/);
@@ -204,23 +212,92 @@ test('同じ数字の複数枚出しと場より強い判定を行う', () => {
   assert.equal(room.game.table.rank, '8');
 });
 
-test('ジョーカーは場より上の最小ランクとして単独で使える', () => {
+test('JOKER単体は2より強い専用ランクとして使える', () => {
   const room = makeRoom({
-    p1: [card('a', '7', 'S'), card('b', '9', 'S')],
+    p1: [card('a', '2', 'S'), card('b', '9', 'S')],
     p2: [joker()]
   });
 
   playCards(room, 'p1', ['a']);
   playCards(room, 'p2', ['JK-1']);
 
+  assert.equal(room.game.table.rank, 'JOKER');
+});
+
+test('JOKERペアは2のペアより強い', () => {
+  const room = makeRoom({
+    p1: [card('a', '2', 'S'), card('b', '2', 'H'), card('c', '9', 'S')],
+    p2: [joker('JK-1'), joker('JK-2')]
+  });
+
+  playCards(room, 'p1', ['a', 'b']);
+  playCards(room, 'p2', ['JK-1', 'JK-2']);
+
+  assert.equal(room.game.table.rank, 'JOKER');
+  assert.equal(room.game.table.count, 2);
+});
+
+test('JOKERは通常カードと混ぜるとその数字の組として扱う', () => {
+  const room = makeRoom({
+    p1: [card('a', '7', 'S'), joker('JK-1'), card('x', '9', 'S')],
+    p2: [card('b', '8', 'S'), card('c', '8', 'H')]
+  });
+
+  playCards(room, 'p1', ['a', 'JK-1']);
+  assert.equal(room.game.table.rank, '7');
+  playCards(room, 'p2', ['b', 'c']);
   assert.equal(room.game.table.rank, '8');
+});
+
+test('JOKER条件は物理JOKER使用を判定し、通常数字・スート条件と独立する', () => {
+  const jokerRule = normalizeRuleInput({ condition: { rank: 'JOKER' }, effect: 'skip', target: 'next' });
+  const rankRule = normalizeRuleInput({ condition: { rank: '7' }, effect: 'skip', target: 'next' });
+  const suitRule = normalizeRuleInput({ condition: { suit: 'S' }, effect: 'skip', target: 'self' });
+  const countRule = normalizeRuleInput({ condition: { count: 2 }, effect: 'skip', target: 'next' });
+
+  assert.equal(
+    getTriggeredRules(
+      [jokerRule, rankRule, suitRule, countRule],
+      {
+        effectiveRank: '7',
+        hasJoker: true,
+        ruleRanks: new Set(['7']),
+        ruleSuits: new Set(['S']),
+        count: 2
+      }
+    ).length,
+    4
+  );
+
+  assert.equal(
+    getTriggeredRules(
+      [jokerRule, rankRule, suitRule, countRule],
+      {
+        effectiveRank: 'JOKER',
+        hasJoker: true,
+        ruleRanks: new Set(),
+        ruleSuits: new Set(),
+        count: 2
+      }
+    ).length,
+    2
+  );
+});
+
+test('7 + 8 + JOKERのような異なる通常数字混在は不正', () => {
+  const room = makeRoom({
+    p1: [card('a', '7', 'S'), card('b', '8', 'H'), joker('JK-1')],
+    p2: [card('c', '9', 'S')]
+  });
+
+  assert.throws(() => playCards(room, 'p1', ['a', 'b', 'JK-1']), /同じ数字/);
 });
 
 test('自分以外の全員がパスすると場が流れる', () => {
   const room = makeRoom({
     p1: [card('a', '7', 'S'), card('b', '9', 'S')],
-    p2: [card('c', '4', 'S'), card('d', '5', 'S')],
-    p3: [card('e', '4', 'H'), card('f', '5', 'H')]
+    p2: [card('c', '8', 'S'), card('d', '5', 'S')],
+    p3: [card('e', '9', 'H'), card('f', '5', 'H')]
   });
 
   playCards(room, 'p1', ['a']);
@@ -231,13 +308,50 @@ test('自分以外の全員がパスすると場が流れる', () => {
   assert.equal(room.game.currentPlayerId, 'p1');
 });
 
+test('誰も上回れない場合は自動で場が流れるがJOKERがあれば流れない', () => {
+  const room = makeRoom({
+    p1: [card('a', '2', 'S'), card('x', '9', 'S')],
+    p2: [card('b', 'K', 'H')],
+    p3: [card('c', 'A', 'D')]
+  });
+
+  playCards(room, 'p1', ['a']);
+
+  assert.equal(room.game.table, null);
+  assert.equal(room.game.currentPlayerId, 'p1');
+
+  const jokerRoom = makeRoom({
+    p1: [card('d', '2', 'S'), card('y', '9', 'S')],
+    p2: [joker()],
+    p3: [card('e', 'A', 'D')]
+  });
+
+  playCards(jokerRoom, 'p1', ['d']);
+
+  assert.equal(jokerRoom.game.table.rank, '2');
+  assert.equal(jokerRoom.game.currentPlayerId, 'p2');
+});
+
+test('JOKERペアを持つ相手がいる場合、2ペアの場は自動で流れない', () => {
+  const room = makeRoom({
+    p1: [card('a', '2', 'S'), card('b', '2', 'H'), card('x', '9', 'S')],
+    p2: [joker('JK-1'), joker('JK-2')],
+    p3: [card('c', 'A', 'D'), card('d', 'A', 'C')]
+  });
+
+  playCards(room, 'p1', ['a', 'b']);
+
+  assert.equal(room.game.table.rank, '2');
+  assert.equal(room.game.currentPlayerId, 'p2');
+});
+
 test('直前条件は場流し後の先頭プレイでは発動しない', () => {
   const room = makeRoom({
     p1: [card('a', '7', 'S'), card('b', '8', 'S')],
     p2: [card('c', '4', 'H'), card('d', '9', 'H')]
   });
   addRule(room, 'p1', {
-    condition: { rankRelation: 'plusOne', suit: 'S' },
+    condition: { rankRelation: 'plusOne', suit: 'S', count: 1 },
     effect: 'reverse',
     target: 'none'
   }, { system: true });
@@ -249,19 +363,19 @@ test('直前条件は場流し後の先頭プレイでは発動しない', () =>
   assert.equal(room.game.direction, 1);
 });
 
-test('ジョーカーの有効数字で直前より+1条件が成立する', () => {
+test('JOKERを通常カードと混ぜた有効数字で直前より+1条件が成立する', () => {
   const room = makeRoom({
-    p1: [card('a', '7', 'S'), card('b', '9', 'S')],
-    p2: [joker()]
+    p1: [card('a', '7', 'S'), card('b', '7', 'H'), card('x', '9', 'S')],
+    p2: [card('c', '8', 'S'), joker()]
   });
   addRule(room, 'p1', {
-    condition: { rankRelation: 'plusOne', suit: 'S' },
+    condition: { rankRelation: 'plusOne', count: 2 },
     effect: 'reverse',
     target: 'none'
   }, { system: true });
 
-  playCards(room, 'p1', ['a']);
-  playCards(room, 'p2', ['JK-1']);
+  playCards(room, 'p1', ['a', 'b']);
+  playCards(room, 'p2', ['c', 'JK-1']);
   assert.equal(room.game.table.rank, '8');
   assert.equal(room.game.direction, -1);
 });
@@ -322,6 +436,9 @@ test('数字縛りは発動プレイと同じ数字だけを合法にする', ()
 
   playCards(room, 'p1', ['a']);
   assert.equal(room.players.find((player) => player.id === 'p2').bindings[0].type, 'rank');
+  room.game.currentPlayerId = 'p2';
+  room.game.table = null;
+  room.game.lastPlayBy = null;
   assert.throws(() => playCards(room, 'p2', ['c']), /数字縛り/);
   passTurn(room, 'p2');
   assert.equal(room.players.find((player) => player.id === 'p2').bindings.length, 0);
@@ -355,6 +472,9 @@ test('階段縛りは発動数字の1つ上だけを合法にし、2ならパス
   }, { system: true });
   playCards(room2, 'p1', ['e']);
   assert.equal(room2.players.find((player) => player.id === 'p2').bindings[0].ranks.length, 0);
+  room2.game.currentPlayerId = 'p2';
+  room2.game.table = null;
+  room2.game.lastPlayBy = null;
   passTurn(room2, 'p2');
   assert.equal(room2.players.find((player) => player.id === 'p2').bindings.length, 0);
 });
@@ -558,7 +678,7 @@ test('隠しルールは発動後に公開される', () => {
     room,
     'p1',
     {
-      condition: { rank: '7', suit: 'S' },
+      condition: { rank: '7', suit: 'S', count: 1 },
       effect: 'reverse',
       target: 'none'
     },
@@ -599,7 +719,7 @@ test('流す効果はPower 4なら追加できる', () => {
   room.game = null;
 
   addRule(room, 'p1', {
-    condition: { rank: '7', suit: 'S' },
+    condition: { rank: '7', suit: 'S', count: 1 },
     effect: 'clear',
     target: 'none'
   }, { system: true });
@@ -734,6 +854,83 @@ test('最終ラウンド後はMATCH_RESULTになり最終ラウンド順位で�
   assert.equal(room.match.scores.p2, 2);
   assert.equal(room.match.finalResults[0].playerId, 'p2');
   assert.equal(room.match.roundResults.length, 4);
+});
+
+test('親はラウンドごとに席順でローテーションする', () => {
+  const room = makeRoom({
+    p1: [],
+    p2: [],
+    p3: []
+  });
+  room.status = 'lobby';
+  room.game = null;
+
+  startGame(room, 'p1', { rng: () => 0.5 });
+  assert.equal(room.game.roundLeaderId, 'p1');
+
+  room.match.currentRound = 2;
+  startRound(room, { rng: () => 0.5 });
+  assert.equal(room.game.roundLeaderId, 'p2');
+
+  room.match.currentRound = 3;
+  startRound(room, { rng: () => 0.5 });
+  assert.equal(room.game.roundLeaderId, 'p3');
+});
+
+test('ホストのゲーム終了は部屋とプレイヤーを維持してロビーへ戻す', () => {
+  const room = makeRoom({
+    p1: [],
+    p2: []
+  });
+  room.status = 'lobby';
+  room.game = null;
+  startGame(room, 'p1', { rng: () => 0.5 });
+  room.rules.push({ id: 'rule1' });
+
+  endGame(room, 'p1');
+
+  assert.equal(room.status, 'lobby');
+  assert.equal(room.match, null);
+  assert.equal(room.game, null);
+  assert.equal(room.rules.length, 0);
+  assert.equal(room.players.length, 2);
+  assert.equal(room.players.every((player) => player.hand.length === 0 && !player.finishedRank), true);
+  assert.equal(room.events.length, 1);
+});
+
+test('上がったプレイヤーだけ他人の手札を観戦できる', () => {
+  const manager = createRoomManager();
+  const { room, player: p1 } = manager.createRoom('A');
+  const { player: p2 } = manager.joinRoom(room.code, 'B');
+  const { player: p3 } = manager.joinRoom(room.code, 'C');
+  room.status = 'playing';
+  room.game = {
+    direction: 1,
+    currentPlayerId: p2.id,
+    roundLeaderId: p1.id,
+    table: null,
+    lastPlayBy: null,
+    passes: [],
+    rankings: [p1.id],
+    roundPlayerIds: [p1.id, p2.id, p3.id],
+    phase: 'playing',
+    pendingAction: null,
+    effectQueue: [],
+    resolvingActorId: null,
+    forceLeadPlayerId: null,
+    emptyTablePasses: [],
+    emptyTableFirstPasserId: null,
+    turnNumber: 1
+  };
+  p1.finishedRank = 1;
+  p2.hand = [card('a', '7', 'S')];
+  p3.hand = [card('b', '8', 'H')];
+
+  const spectatorState = manager.getPublicState(room, p1.id);
+  const playingState = manager.getPublicState(room, p2.id);
+
+  assert.equal(spectatorState.players.find((player) => player.id === p2.id).hand.length, 1);
+  assert.equal(playingState.players.find((player) => player.id === p3.id).hand, null);
 });
 
 test('ロビーでホストが退出すると次のプレイヤーへホストを移す', () => {

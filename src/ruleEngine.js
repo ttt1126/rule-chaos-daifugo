@@ -49,6 +49,9 @@ function normalizeRuleInput(input) {
   if (suit !== null && !VALID_SUITS.has(suit)) {
     throw new Error('存在しないスート条件です');
   }
+  if (rank === 'JOKER' && suit !== null) {
+    throw new Error('JOKER条件にはスートを指定できません');
+  }
   if (count !== null && !VALID_COUNTS.has(count)) {
     throw new Error('枚数条件は1〜4枚から選んでください');
   }
@@ -117,7 +120,7 @@ function calculateConditionPower(condition = {}) {
   if (rank) {
     power += rank === 'JOKER' ? CONDITION_POWER.jokerRank : CONDITION_POWER.rank;
   }
-  if (suit) {
+  if (suit && rank !== 'JOKER') {
     power += CONDITION_POWER.suit;
   }
   if (count !== null) {

@@ -15,7 +15,13 @@ function buildCondition(effect, rng) {
     const slot = conditionSlots.splice(Math.floor(rng() * conditionSlots.length), 1)[0];
     if (slot === 'rank') {
       condition.rank = rng() < 0.08 ? 'JOKER' : randomItem(RANKS, rng);
+      if (condition.rank === 'JOKER') {
+        condition.suit = null;
+      }
     } else if (slot === 'suit') {
+      if (condition.rank === 'JOKER') {
+        continue;
+      }
       condition.suit = randomItem(SUITS, rng).id;
     } else if (slot === 'rankRelation') {
       condition.rankRelation = 'plusOne';

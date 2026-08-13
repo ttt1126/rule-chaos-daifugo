@@ -9,6 +9,7 @@ const {
   chooseTarget,
   chooseTransferCard,
   directionLabel,
+  endGame,
   getTurnAvailability,
   isGamePaused,
   leavePlayer,
@@ -119,7 +120,12 @@ function createRoomManager() {
     const currentPlayer = room.game?.currentPlayerId
       ? room.players.find((player) => player.id === room.game.currentPlayerId)
       : null;
+    const roundLeader = room.game?.roundLeaderId
+      ? room.players.find((player) => player.id === room.game.roundLeaderId)
+      : null;
     const pendingAction = getViewerPendingAction(room, viewerId);
+    const viewer = room.players.find((player) => player.id === viewerId);
+    const canSpectateHands = Boolean(viewer?.finishedRank || room.status === 'matchResult' || room.status === 'finished');
 
     return {
       code: room.code,
@@ -143,8 +149,12 @@ function createRoomManager() {
         disconnectedAt: player.disconnectedAt,
         disconnectGraceMs: DISCONNECT_GRACE_MS,
         cardCount: player.left ? 0 : player.hand.length,
-        hand: player.id === viewerId && !player.left ? sortHand(player.hand).map(publicCard) : null,
+        hand:
+          !player.left && (player.id === viewerId || canSpectateHands)
+            ? sortHand(player.hand).map(publicCard)
+            : null,
         finishedRank: player.finishedRank,
+        isRoundLeader: room.game?.roundLeaderId === player.id,
         score: room.match?.scores?.[player.id] || 0,
         roundRanks: room.match?.roundResults?.map((round) => {
           const result = round.rankings.find((entry) => entry.playerId === player.id);
@@ -161,6 +171,8 @@ function createRoomManager() {
             directionLabel: directionLabel(room),
             currentPlayerId: room.game.currentPlayerId,
             currentPlayerName: currentPlayer?.name || null,
+            roundLeaderId: room.game.roundLeaderId || null,
+            roundLeaderName: roundLeader?.name || null,
             isYourTurn: room.game.currentPlayerId === viewerId,
             table: room.game.table
               ? {
@@ -221,6 +233,7 @@ function createRoomManager() {
       dispatch(room, () => chooseTarget(room, playerId, pendingId, targetPlayerId)),
     chooseTransferCard: (room, playerId, pendingId, cardId) =>
       dispatch(room, () => chooseTransferCard(room, playerId, pendingId, cardId)),
+    endGame: (room, playerId) => dispatch(room, () => endGame(room, playerId)),
     leaveRoom: (room, playerId) => {
       const player = room.players.find((candidate) => candidate.id === playerId);
       if (!player) {
@@ -366,7 +379,8 @@ function getViewerPendingAction(room, viewerId) {
       ...base,
       waitingForYou: true,
       targetPlayerId: pending.targetPlayerId,
-      targetName: target?.name || null
+      targetName: target?.name || null,
+      requiredCount: pending.requiredCount || 1
     };
   }
 

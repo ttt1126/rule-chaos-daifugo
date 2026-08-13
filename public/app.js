@@ -1,6 +1,7 @@
 const STORAGE_KEY = 'rule-chaos-daifugo-session';
 
 const RANKS = ['3', '4', '5', '6', '7', '8', '9', '10', 'J', 'Q', 'K', 'A', '2', 'JOKER'];
+const NORMAL_RANKS = RANKS.filter((rank) => rank !== 'JOKER');
 const SUITS = [
   ['S', '♠'],
   ['H', '♥'],
@@ -16,7 +17,7 @@ const CONNECTORS = [
 const CONDITION_POWER = {
   rank: 2,
   jokerRank: 3,
-  suit: 2,
+  suit: 1,
   rankRelationPlusOne: 2,
   suitRelationSame: 2,
   counts: { 1: 1, 2: 2, 3: 3, 4: 4 },
@@ -81,6 +82,11 @@ let socket = null;
 let session = loadSession();
 let roomState = null;
 let selectedCardIds = new Set();
+let selectedGiftCardIds = new Set();
+let seenEventIds = new Set();
+let ruleNotices = [];
+let ruleNoticeTimer = null;
+let showRulesHelp = false;
 let message = '';
 let ruleDraft = {
   condition: { rank: '', suit: '', count: '', rankRelation: '', suitRelation: '' },
@@ -105,8 +111,10 @@ function connectSocket() {
   });
 
   socket.on('state', (nextState) => {
+    collectRuleNotices(nextState);
     roomState = nextState;
     trimSelectedCards();
+    trimSelectedGiftCards();
     render();
   });
 
@@ -153,6 +161,20 @@ document.addEventListener('click', (event) => {
     emitAuthed('leaveRoom', {}, () => {
       leaveLocalRoom('退出しました');
     });
+  }
+  if (action === 'toggle-rules-help') {
+    showRulesHelp = !showRulesHelp;
+    render();
+  }
+  if (action === 'close-rules-help') {
+    showRulesHelp = false;
+    render();
+  }
+  if (action === 'end-game') {
+    if (!window.confirm('現在のゲームを終了してロビーに戻りますか？')) {
+      return;
+    }
+    emitAuthed('endGame', {});
   }
   if (action === 'start') {
     emitAuthed('startGame', {});
@@ -202,11 +224,17 @@ document.addEventListener('click', (event) => {
       targetPlayerId: button.dataset.targetId
     });
   }
-  if (action === 'gift-card') {
+  if (action === 'select-gift-card') {
+    toggleGiftCard(button.dataset.cardId, Number(button.dataset.requiredCount || 1));
+  }
+  if (action === 'confirm-gift-card') {
     const pending = roomState?.game?.pendingAction;
+    const [cardId] = selectedGiftCardIds;
     emitAuthed('chooseTransferCard', {
       pendingId: pending?.id,
-      cardId: button.dataset.cardId
+      cardId
+    }, () => {
+      selectedGiftCardIds.clear();
     });
   }
 });
@@ -219,6 +247,9 @@ document.addEventListener('change', (event) => {
     const fieldName = field.dataset.ruleField;
     if (fieldName === 'rank' || fieldName === 'suit' || fieldName === 'count') {
       ruleDraft.condition[fieldName] = field.value;
+      if (fieldName === 'rank' && field.value === 'JOKER') {
+        ruleDraft.condition.suit = '';
+      }
     } else if (fieldName === 'rankRelation' || fieldName === 'suitRelation') {
       ruleDraft.condition[fieldName] = field.checked ? field.value : '';
     } else {
@@ -299,6 +330,9 @@ function leaveLocalRoom(text) {
   session = null;
   roomState = null;
   selectedCardIds.clear();
+  selectedGiftCardIds.clear();
+  ruleNotices = [];
+  seenEventIds.clear();
   localStorage.removeItem(STORAGE_KEY);
   message = text;
   render();
@@ -319,6 +353,12 @@ function trimSelectedCards() {
   selectedCardIds = new Set([...selectedCardIds].filter((id) => validIds.has(id)));
 }
 
+function trimSelectedGiftCards() {
+  const ownHand = roomState?.players.find((player) => player.isYou)?.hand || [];
+  const validIds = new Set(ownHand.map((card) => card.id));
+  selectedGiftCardIds = new Set([...selectedGiftCardIds].filter((id) => validIds.has(id)));
+}
+
 function toggleSelectedCard(cardId) {
   if (selectedCardIds.has(cardId)) {
     selectedCardIds.delete(cardId);
@@ -326,6 +366,50 @@ function toggleSelectedCard(cardId) {
     selectedCardIds.add(cardId);
   }
   render();
+}
+
+function toggleGiftCard(cardId, requiredCount = 1) {
+  if (selectedGiftCardIds.has(cardId)) {
+    selectedGiftCardIds.delete(cardId);
+  } else {
+    selectedGiftCardIds = new Set([cardId, ...selectedGiftCardIds].slice(0, requiredCount));
+  }
+  render();
+}
+
+function collectRuleNotices(nextState) {
+  const incomingEvents = nextState?.recentEvents || [];
+  if (seenEventIds.size === 0) {
+    seenEventIds = new Set(incomingEvents.map((event) => event.id));
+    return;
+  }
+
+  const newRuleEvents = [...incomingEvents]
+    .reverse()
+    .filter((event) => isRuleNoticeEvent(event) && !seenEventIds.has(event.id));
+
+  for (const event of incomingEvents) {
+    seenEventIds.add(event.id);
+  }
+  if (seenEventIds.size > 80) {
+    seenEventIds = new Set([...seenEventIds].slice(-80));
+  }
+
+  if (newRuleEvents.length === 0) {
+    return;
+  }
+
+  ruleNotices = newRuleEvents.slice(-3);
+  window.clearTimeout(ruleNoticeTimer);
+  ruleNoticeTimer = window.setTimeout(() => {
+    ruleNotices = [];
+    render();
+  }, 2200);
+}
+
+function isRuleNoticeEvent(event) {
+  const text = String(event.text || '');
+  return event.type === 'rule' && (text.includes('ルール:') || text.includes('隠しルールが発動'));
 }
 
 function showMessage(text) {
@@ -375,6 +459,8 @@ function render() {
           ${roomState ? renderRoomCode() : ''}
         </div>
         <div class="top-actions">
+          <button class="ghost" data-click="toggle-rules-help" type="button">ルール説明</button>
+          ${roomState?.isHost && roomState.status !== 'lobby' ? '<button class="ghost danger" data-click="end-game" type="button">ゲーム終了</button>' : ''}
           ${roomState ? '<button class="ghost danger" data-click="leave" type="button">退出</button>' : ''}
           <div class="connection ${socket?.connected ? 'online' : 'offline'}">
             ${socket?.connected ? '接続中' : '未接続'}
@@ -382,6 +468,8 @@ function render() {
         </div>
       </header>
       ${message ? `<div class="message">${escapeHtml(message)}</div>` : ''}
+      ${renderRuleNotices()}
+      ${showRulesHelp ? renderRulesHelp() : ''}
       ${roomState ? renderRoom() : renderEntrance()}
     </main>
   `;
@@ -393,6 +481,51 @@ function renderRoomCode() {
       <span class="room-code">部屋 ${escapeHtml(roomState.code)}</span>
       <button class="copy-code-button" data-click="copy-room-code" type="button">コピー</button>
     </div>
+  `;
+}
+
+function renderRuleNotices() {
+  if (ruleNotices.length === 0) return '';
+
+  return `
+    <section class="rule-notice">
+      <strong>特殊ルール発動！</strong>
+      <ul>
+        ${ruleNotices.map((event) => `<li>${escapeHtml(event.text)}</li>`).join('')}
+      </ul>
+    </section>
+  `;
+}
+
+function renderRulesHelp() {
+  return `
+    <section class="rules-help">
+      <div class="table-header">
+        <h2>ルール説明</h2>
+        <button class="ghost" data-click="close-rules-help" type="button">閉じる</button>
+      </div>
+      <div class="help-grid">
+        <div>
+          <h3>基本</h3>
+          <ul>
+            <li>強さは 3 から 2 まで。通常カードでは 2 が最強です。</li>
+            <li>JOKER単体は2より強く、JOKER2枚は2のペアより強いです。</li>
+            <li>JOKERを通常カードと一緒に出すと、その数字を補います。JOKERにスートはありません。</li>
+            <li>場がある時は同じ枚数で、より強い組を出します。出したくなければパスできます。</li>
+            <li>手札をなくした順にラウンド順位が決まります。</li>
+          </ul>
+        </div>
+        <div>
+          <h3>特殊ルール</h3>
+          <ul>
+            <li>ラウンド終了ごとに各プレイヤーが特殊ルールを1つ追加します。</li>
+            <li>追加したルールは次ラウンド以降も残ります。</li>
+            <li>条件、対象、効果をパズルのように組み合わせます。</li>
+            <li>強い対象や効果ほど、厳しい条件Powerが必要です。</li>
+          </ul>
+        </div>
+      </div>
+    </section>
   `;
 }
 
@@ -575,7 +708,7 @@ function renderMatchSummary() {
     <section class="panel compact-panel">
       <div class="table-header">
         <h2>第${match.currentRound}/${match.totalRounds}ラウンド</h2>
-        <span>累積ポイント</span>
+        <span>親: ${escapeHtml(roomState.game?.roundLeaderName || '')}</span>
       </div>
       ${renderScoreRows(true)}
     </section>
@@ -687,13 +820,13 @@ function renderTurnBanner() {
       : availability.canPass
         ? 'カードを選んで出すか、パスできます'
         : '場を開始するカードを出してください';
-    return `<section class="status-banner your-turn"><strong>${availability.noLegalPlay ? '出せるカードがありません' : 'あなたのターンです'}</strong><span>${escapeHtml(
+    return `<section class="status-banner your-turn"><strong>${availability.noLegalPlay ? '出せるカードがありません' : 'あなたの番です'}</strong><span>${escapeHtml(
       `${roundLabel} / ${actionText}`
     )}</span></section>`;
   }
   return `<section class="status-banner"><strong>${escapeHtml(
     game.currentPlayerName || ''
-  )}さんのターン</strong><span>${escapeHtml(`${roundLabel} / ${game.directionLabel}`)}</span></section>`;
+  )}さんの番です</strong><span>${escapeHtml(`${roundLabel} / ${game.directionLabel}`)}</span></section>`;
 }
 
 function renderPlayers() {
@@ -711,12 +844,14 @@ function renderPlayers() {
                   <strong>${escapeHtml(player.name)}${player.isYou ? '（あなた）' : ''}</strong>
                   <div class="player-meta">
                     ${player.isHost ? '<span>ホスト</span>' : ''}
+                    ${player.isRoundLeader ? '<span>親</span>' : ''}
                     <span>${player.left ? '退出' : player.connected ? '接続中' : '切断中'}</span>
                     ${roomState.match ? `<span>${player.score || 0}pt</span>` : ''}
                     ${player.finishedRank ? `<span>${player.finishedRank}位</span>` : ''}
                     ${player.skipTurns ? `<span>スキップ ${player.skipTurns}</span>` : ''}
                     ${(player.bindings || []).map((binding) => `<span>${escapeHtml(binding.label)}</span>`).join('')}
                   </div>
+                  ${renderSpectatorHand(player)}
                 </div>
                 <span class="card-count">${player.cardCount}枚</span>
               </div>
@@ -725,6 +860,18 @@ function renderPlayers() {
           .join('')}
       </div>
     </section>
+  `;
+}
+
+function renderSpectatorHand(player) {
+  if (player.isYou || !Array.isArray(player.hand) || player.hand.length === 0) {
+    return '';
+  }
+
+  return `
+    <div class="spectator-hand">
+      ${player.hand.map((card) => renderCard(card)).join('')}
+    </div>
   `;
 }
 
@@ -806,19 +953,25 @@ function renderPendingAction() {
 
   if (pending.type === 'giftCard') {
     const hand = ownPlayer()?.hand || [];
+    const requiredCount = pending.requiredCount || 1;
+    const selectedCount = selectedGiftCardIds.size;
     return `
       <section class="pending-panel">
         <h2>${escapeHtml(pending.targetName || '')}さんへ渡すカード</h2>
+        <p class="selection-counter">選択済み: ${selectedCount} / ${requiredCount}</p>
         <div class="hand-grid compact">
           ${hand
-            .map(
-              (card) =>
-                `<button class="card-button ${cardClass(card)}" data-click="gift-card" data-card-id="${escapeAttr(
-                  card.id
-                )}" type="button">${escapeHtml(card.label)}</button>`
-            )
+            .map((card) => {
+              const selected = selectedGiftCardIds.has(card.id) ? ' selected' : '';
+              return `<button class="card-button ${cardClass(card)}${selected}" data-click="select-gift-card" data-card-id="${escapeAttr(
+                card.id
+              )}" data-required-count="${requiredCount}" type="button">${escapeHtml(card.label)}</button>`;
+            })
             .join('')}
         </div>
+        <button class="primary" data-click="confirm-gift-card" type="button" ${selectedCount === requiredCount ? '' : 'disabled'}>
+          このカードを渡す
+        </button>
       </section>
     `;
   }
@@ -836,7 +989,7 @@ function renderHand() {
   const cardsDisabled = disabled || Boolean(game?.isYourTurn && availability.noLegalPlay);
 
   return `
-    <section class="hand-area">
+    <section class="hand-area ${game?.isYourTurn && !game?.pendingAction ? 'your-turn-hand' : ''}">
       <div class="hand-header">
         <h2>手札</h2>
         <span>${selectedCardIds.size}枚選択中</span>
@@ -895,6 +1048,7 @@ function renderRuleBuilder() {
   const target = getDraftTarget();
   const selectedConnector = target?.connector || 'GLOBAL';
   const validation = validateRuleDraft();
+  const jokerCondition = ruleDraft.condition.rank === 'JOKER';
 
   return `
     <section class="panel rule-builder-panel">
@@ -915,10 +1069,11 @@ function renderRuleBuilder() {
             </label>
             <label>
               スート
-              <select data-rule-field="suit">
+              <select data-rule-field="suit" ${jokerCondition ? 'disabled' : ''}>
                 <option value="">指定なし</option>
                 ${SUITS.map(([id, symbol]) => option(id, symbol, ruleDraft.condition.suit)).join('')}
               </select>
+              ${jokerCondition ? '<small>JOKERはスートなし</small>' : ''}
             </label>
             <label>
               枚数
@@ -1076,6 +1231,97 @@ function renderTargetPeg(connectorId, connected) {
   `;
 }
 
+function previewTriggeredRuleIds() {
+  if (roomState?.settings?.mode !== 'normal' || selectedCardIds.size === 0) {
+    return new Set();
+  }
+
+  const play = analyzeSelectedPlayPreview();
+  if (!play) {
+    return new Set();
+  }
+
+  return new Set(
+    roomState.rules
+      .filter((rule) => !rule.hidden && rule.condition && conditionMatchesPreview(rule.condition, play))
+      .map((rule) => rule.id)
+  );
+}
+
+function analyzeSelectedPlayPreview() {
+  const hand = ownPlayer()?.hand || [];
+  const byId = new Map(hand.map((card) => [card.id, card]));
+  const cards = [...selectedCardIds].map((id) => byId.get(id)).filter(Boolean);
+  if (cards.length !== selectedCardIds.size || cards.length < 1 || cards.length > 4) {
+    return null;
+  }
+
+  const nonJokers = cards.filter((card) => !card.joker);
+  const hasJoker = nonJokers.length !== cards.length;
+  const printedRanks = [...new Set(nonJokers.map((card) => card.rank))];
+  if (printedRanks.length > 1) {
+    return null;
+  }
+
+  const jokerOnly = nonJokers.length === 0;
+  const effectiveRank = jokerOnly ? 'JOKER' : printedRanks[0];
+  const table = roomState.game?.table;
+  if (table) {
+    if (cards.length !== table.count || rankValue(effectiveRank) <= rankValue(table.rank)) {
+      return null;
+    }
+  }
+
+  const previousSuits = new Set((table?.cards || []).filter((card) => !card.joker && card.suit).map((card) => card.suit));
+  return {
+    count: cards.length,
+    effectiveRank,
+    hasJoker,
+    ruleRanks: jokerOnly ? new Set() : new Set([effectiveRank]),
+    ruleSuits: new Set(nonJokers.map((card) => card.suit)),
+    previousRank: table?.rank || null,
+    previousSuits
+  };
+}
+
+function conditionMatchesPreview(condition, play) {
+  if (condition.rank) {
+    if (condition.rank === 'JOKER') {
+      if (!play.hasJoker) return false;
+    } else if (!play.ruleRanks.has(condition.rank)) {
+      return false;
+    }
+  }
+  if (condition.suit && !play.ruleSuits.has(condition.suit)) {
+    return false;
+  }
+  if (condition.count && Number(condition.count) !== play.count) {
+    return false;
+  }
+  if (condition.rankRelation === 'plusOne') {
+    const previousIndex = NORMAL_RANKS.indexOf(play.previousRank);
+    const currentIndex = NORMAL_RANKS.indexOf(play.effectiveRank);
+    if (previousIndex < 0 || currentIndex !== previousIndex + 1) {
+      return false;
+    }
+  }
+  if (condition.suitRelation === 'same') {
+    if (!play.previousSuits || play.previousSuits.size === 0) {
+      return false;
+    }
+    if (![...play.ruleSuits].some((suit) => play.previousSuits.has(suit))) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function rankValue(rank) {
+  if (rank === 'JOKER') return NORMAL_RANKS.length + 3;
+  const index = NORMAL_RANKS.indexOf(rank);
+  return index < 0 ? -1 : index + 3;
+}
+
 function renderEffectSockets(effectId, selectedConnector) {
   const effectConfig = EFFECT_CONFIGS[effectId];
   return `
@@ -1090,6 +1336,7 @@ function renderEffectSockets(effectId, selectedConnector) {
 }
 
 function renderRules() {
+  const highlightedRuleIds = previewTriggeredRuleIds();
   return `
     <section class="panel">
       <h2>特殊ルール</h2>
@@ -1099,9 +1346,12 @@ function renderRules() {
               ${roomState.rules
                 .map(
                   (rule) =>
-                    `<div class="rule-row ${rule.hidden ? 'hidden-rule' : ''}">
+                    `<div class="rule-row ${rule.hidden ? 'hidden-rule' : ''} ${
+                      highlightedRuleIds.has(rule.id) ? 'trigger-preview' : ''
+                    }">
                       <span>${escapeHtml(rule.description)}</span>
                       ${rule.generated ? '<small>ランダム</small>' : ''}
+                      ${highlightedRuleIds.has(rule.id) ? '<small>発動候補</small>' : ''}
                     </div>`
                 )
                 .join('')}
@@ -1237,6 +1487,10 @@ function validateRuleDraft() {
     return { ok: false, message: '条件を1つ以上選んでください' };
   }
 
+  if (ruleDraft.condition.rank === 'JOKER' && ruleDraft.condition.suit) {
+    return { ok: false, message: 'JOKER条件にはスートを指定できません' };
+  }
+
   const power = calculateConditionPower(ruleDraft.condition);
   const targetState = targetOptionState(ruleDraft.target, power, getDraftTargetLabel());
   if (!targetState.ok) {
@@ -1261,7 +1515,7 @@ function calculateConditionPower(condition) {
     power += condition.rank === 'JOKER' ? CONDITION_POWER.jokerRank : CONDITION_POWER.rank;
   }
   if (condition.suit) {
-    power += CONDITION_POWER.suit;
+    power += condition.rank === 'JOKER' ? 0 : CONDITION_POWER.suit;
   }
   if (condition.count) {
     power += CONDITION_POWER.counts[Number(condition.count)] || 0;

@@ -1,5 +1,8 @@
 const RANKS = ['3', '4', '5', '6', '7', '8', '9', '10', 'J', 'Q', 'K', 'A', '2'];
-const RANK_VALUES = Object.fromEntries(RANKS.map((rank, index) => [rank, index + 3]));
+const RANK_VALUES = {
+  ...Object.fromEntries(RANKS.map((rank, index) => [rank, index + 3])),
+  JOKER: RANKS.length + 3
+};
 
 const SUITS = [
   { id: 'S', symbol: '♠', label: 'スペード' },
@@ -24,7 +27,7 @@ const CONNECTOR_ORDER = ['SELF', 'NEXT', 'CHOICE', 'GLOBAL'];
 const CONDITION_POWER = {
   rank: 2,
   jokerRank: 3,
-  suit: 2,
+  suit: 1,
   rankRelationPlusOne: 2,
   suitRelationSame: 2,
   counts: {
