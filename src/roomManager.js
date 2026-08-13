@@ -1,11 +1,19 @@
 const crypto = require('crypto');
-const { MODES, SUIT_SYMBOLS } = require('./constants');
+const {
+  BINDING_MODES,
+  DEFAULT_BINDING_MODE_BY_MODE,
+  LOCAL_RULE_IDS,
+  MODES,
+  SUIT_SYMBOLS
+} = require('./constants');
 const { makeId, makeReconnectToken, publicCard, sortHand } = require('./cardUtils');
+const { DEFAULT_LOCAL_RULE_SETTINGS, LOCAL_RULES, enabledLocalRules, normalizeLocalRuleSettings } = require('./localRules');
 const { calculateConditionPower, describeRule, targetConnector, validTargetsForEffect } = require('./ruleEngine');
 const {
   addEvent,
   addRule,
   beginRuleBuilding,
+  chooseDiscardCards,
   chooseTarget,
   chooseTransferCard,
   directionLabel,
@@ -38,7 +46,9 @@ function createRoomManager() {
       settings: {
         mode: 'normal',
         hiddenRuleCount: 5,
-        roundCount: 4
+        roundCount: 4,
+        bindingMode: DEFAULT_BINDING_MODE_BY_MODE.normal,
+        localRules: { ...DEFAULT_LOCAL_RULE_SETTINGS }
       },
       players: [player],
       rules: [],
@@ -137,7 +147,12 @@ function createRoomManager() {
         mode: room.settings.mode,
         modeLabel: MODES[room.settings.mode]?.label || room.settings.mode,
         hiddenRuleCount: room.settings.hiddenRuleCount,
-        roundCount: room.settings.roundCount
+        roundCount: room.settings.roundCount,
+        bindingMode: room.settings.bindingMode || DEFAULT_BINDING_MODE_BY_MODE[room.settings.mode] || 'standard',
+        bindingModeLabel:
+          BINDING_MODES[room.settings.bindingMode || DEFAULT_BINDING_MODE_BY_MODE[room.settings.mode] || 'standard']
+            ?.label || '標準',
+        localRules: normalizeLocalRuleSettings(room.settings.localRules)
       },
       players: room.players.map((player) => ({
         id: player.id,
@@ -203,7 +218,22 @@ function createRoomManager() {
         target: rule.secret && !rule.revealed ? null : rule.target,
         targetConnector: rule.secret && !rule.revealed ? null : targetConnector(rule.target),
         effect: rule.secret && !rule.revealed ? null : rule.effect,
+        effectConfig: rule.secret && !rule.revealed ? null : rule.effectConfig || {},
         description: describeRule(rule)
+      })),
+      localRules: enabledLocalRules(room.settings.localRules).map((rule) => ({
+        id: rule.ruleId,
+        localRuleId: rule.id,
+        label: rule.label,
+        description: rule.description,
+        condition: rule.condition,
+        target: rule.target,
+        effect: rule.effect
+      })),
+      localRuleOptions: LOCAL_RULE_IDS.map((id) => ({
+        id,
+        label: LOCAL_RULES[id].label,
+        description: LOCAL_RULES[id].description
       })),
       recentEvents: [...room.events].slice(-12).reverse(),
       targetOptions: Object.fromEntries(
@@ -231,8 +261,10 @@ function createRoomManager() {
     beginRuleBuilding: (room, playerId) => dispatch(room, () => beginRuleBuilding(room, playerId)),
     chooseTarget: (room, playerId, pendingId, targetPlayerId) =>
       dispatch(room, () => chooseTarget(room, playerId, pendingId, targetPlayerId)),
-    chooseTransferCard: (room, playerId, pendingId, cardId) =>
-      dispatch(room, () => chooseTransferCard(room, playerId, pendingId, cardId)),
+    chooseTransferCard: (room, playerId, pendingId, cardIds) =>
+      dispatch(room, () => chooseTransferCard(room, playerId, pendingId, cardIds)),
+    chooseDiscardCards: (room, playerId, pendingId, cardIds) =>
+      dispatch(room, () => chooseDiscardCards(room, playerId, pendingId, cardIds)),
     endGame: (room, playerId) => dispatch(room, () => endGame(room, playerId)),
     leaveRoom: (room, playerId) => {
       const player = room.players.find((candidate) => candidate.id === playerId);
@@ -267,7 +299,7 @@ function createRoomManager() {
 
 function validTargetsByEffect() {
   return Object.fromEntries(
-    ['skip', 'bindSuit', 'bindRank', 'bindStep', 'reverse', 'clear', 'gift'].map((effect) => [
+    ['skip', 'bindSuit', 'bindRank', 'reverse', 'clear', 'gift'].map((effect) => [
       effect,
       validTargetsForEffect(effect)
     ])
@@ -299,7 +331,7 @@ function publicBindings(player) {
       const ranks = binding.ranks || [];
       return {
         type: 'step',
-        label: `階段縛り: ${ranks.length > 0 ? `${ranks.join(' / ')}のみ` : 'パスのみ'}`
+        label: `数字縛り: ${ranks.length > 0 ? `${ranks.join(' / ')}のみ` : 'パスのみ'}`
       };
     }
     return { type: binding.type || 'unknown', label: '縛り' };
@@ -380,6 +412,14 @@ function getViewerPendingAction(room, viewerId) {
       waitingForYou: true,
       targetPlayerId: pending.targetPlayerId,
       targetName: target?.name || null,
+      requiredCount: pending.requiredCount || 1
+    };
+  }
+
+  if (pending.type === 'discardCard') {
+    return {
+      ...base,
+      waitingForYou: true,
       requiredCount: pending.requiredCount || 1
     };
   }

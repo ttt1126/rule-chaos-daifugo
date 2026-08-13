@@ -202,6 +202,11 @@ h2 {
   line-height: 1.45;
 }
 
+.help-grid p {
+  color: var(--muted);
+  line-height: 1.45;
+}
+
 .entrance-grid,
 .content-grid {
   display: grid;
@@ -266,6 +271,54 @@ form,
   gap: 12px;
 }
 
+.local-rule-settings {
+  display: grid;
+  gap: 10px;
+  margin: 14px 0;
+}
+
+.local-rule-settings h3,
+.rule-section h3,
+.trigger-preview-panel h3 {
+  margin: 0;
+  font-size: 0.92rem;
+}
+
+.setting-check-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: 10px;
+}
+
+.setting-check {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  align-items: start;
+  gap: 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fbfcf8;
+  padding: 10px;
+}
+
+.setting-check input {
+  width: auto;
+  min-height: auto;
+  margin-top: 3px;
+}
+
+.setting-check strong,
+.setting-check small {
+  display: block;
+}
+
+.setting-check small {
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: 0.78rem;
+  line-height: 1.3;
+}
+
 .button-row,
 .action-bar {
   display: flex;
@@ -318,6 +371,37 @@ form,
 .rule-list {
   display: grid;
   gap: 8px;
+}
+
+.rule-section {
+  display: grid;
+  gap: 8px;
+}
+
+.rule-section + .rule-section {
+  margin-top: 14px;
+}
+
+.trigger-preview-panel {
+  display: grid;
+  gap: 8px;
+  margin-bottom: 14px;
+  border: 1px solid #e4c98d;
+  border-radius: 8px;
+  background: #fff7e8;
+  padding: 10px 12px;
+}
+
+.trigger-preview-panel ul {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding-left: 18px;
+  color: #71550e;
+}
+
+.trigger-preview-panel strong {
+  color: var(--accent-strong);
 }
 
 .player-row,
@@ -830,6 +914,14 @@ form,
   border-color: var(--gold);
   background: #fff7e8;
   box-shadow: inset 4px 0 0 var(--gold);
+}
+
+.local-rule-row span {
+  font-weight: 800;
+}
+
+.effect-config-control {
+  margin-top: 10px;
 }
 
 .event-list {

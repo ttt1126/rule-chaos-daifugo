@@ -167,7 +167,16 @@ function registerSocketHandlers(io, manager) {
     socket.on('chooseTransferCard', (payload, ack) => {
       handle(socket, ack, () => {
         const { room, playerId } = requireSocketRoom(socket, payload);
-        manager.chooseTransferCard(room, playerId, payload?.pendingId, payload?.cardId);
+        manager.chooseTransferCard(room, playerId, payload?.pendingId, payload?.cardIds || payload?.cardId);
+        emitRoomState(room);
+        return {};
+      });
+    });
+
+    socket.on('chooseDiscardCards', (payload, ack) => {
+      handle(socket, ack, () => {
+        const { room, playerId } = requireSocketRoom(socket, payload);
+        manager.chooseDiscardCards(room, playerId, payload?.pendingId, payload?.cardIds || payload?.cardId);
         emitRoomState(room);
         return {};
       });

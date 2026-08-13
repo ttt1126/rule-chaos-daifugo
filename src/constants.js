@@ -39,6 +39,25 @@ const CONDITION_POWER = {
   max: 4
 };
 
+const BINDING_MODES = {
+  standard: {
+    id: 'standard',
+    label: '標準',
+    description: '同じ種類の縛りは新しい縛りで上書きします。'
+  },
+  chaos: {
+    id: 'chaos',
+    label: 'カオス',
+    description: '同じ種類の縛りもすべて残し、AND条件として扱います。'
+  }
+};
+
+const DEFAULT_BINDING_MODE_BY_MODE = {
+  normal: 'standard',
+  chaos: 'chaos',
+  mystery: 'standard'
+};
+
 const TARGETS = {
   none: { id: 'none', label: '対象なし', connector: 'GLOBAL' },
   self: { id: 'self', label: '自分', connector: 'SELF' },
@@ -48,10 +67,17 @@ const TARGETS = {
 };
 
 const EFFECTS = {
+  gift: {
+    id: 'gift',
+    label: '渡す',
+    order: 10,
+    targets: ['next', 'any'],
+    connectors: ['NEXT', 'CHOICE']
+  },
   reverse: {
     id: 'reverse',
     label: 'リバース',
-    order: 10,
+    order: 20,
     targets: ['none'],
     connectors: ['GLOBAL'],
     fixedTarget: 'none',
@@ -60,42 +86,28 @@ const EFFECTS = {
   skip: {
     id: 'skip',
     label: 'スキップ',
-    order: 20,
+    order: 30,
     targets: ['self', 'next', 'any'],
     connectors: ['SELF', 'NEXT', 'CHOICE']
   },
   bindSuit: {
     id: 'bindSuit',
     label: 'スート縛り',
-    order: 30,
+    order: 40,
     targets: ['self', 'next', 'any', 'all'],
     connectors: ['SELF', 'NEXT', 'CHOICE', 'GLOBAL']
   },
   bindRank: {
     id: 'bindRank',
     label: '数字縛り',
-    order: 31,
+    order: 41,
     targets: ['self', 'next', 'any', 'all'],
     connectors: ['SELF', 'NEXT', 'CHOICE', 'GLOBAL']
-  },
-  bindStep: {
-    id: 'bindStep',
-    label: '階段縛り',
-    order: 32,
-    targets: ['self', 'next', 'any', 'all'],
-    connectors: ['SELF', 'NEXT', 'CHOICE', 'GLOBAL']
-  },
-  gift: {
-    id: 'gift',
-    label: '渡す',
-    order: 40,
-    targets: ['next', 'any'],
-    connectors: ['NEXT', 'CHOICE']
   },
   clear: {
     id: 'clear',
     label: '流す',
-    order: 50,
+    order: 60,
     targets: ['none'],
     connectors: ['GLOBAL'],
     fixedTarget: 'none',
@@ -111,6 +123,7 @@ const MODES = {
 
 const HIDDEN_RULE_COUNTS = [3, 5, 8, 10];
 const ROUND_COUNTS = [3, 4, 5];
+const LOCAL_RULE_IDS = ['eightCut', 'fiveSkip', 'sevenGift', 'tenDiscard'];
 
 const MATCH_DEFAULTS = {
   roundCount: 4,
@@ -122,11 +135,14 @@ const MATCH_DEFAULTS = {
 };
 
 module.exports = {
+  BINDING_MODES,
   CONDITION_POWER,
   CONNECTOR_ORDER,
   CONNECTORS,
+  DEFAULT_BINDING_MODE_BY_MODE,
   EFFECTS,
   HIDDEN_RULE_COUNTS,
+  LOCAL_RULE_IDS,
   MATCH_DEFAULTS,
   MODES,
   RANKS,

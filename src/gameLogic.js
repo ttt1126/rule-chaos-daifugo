@@ -1,4 +1,14 @@
-const { MATCH_DEFAULTS, MODES, RANKS, RANK_VALUES, ROUND_COUNTS, SUITS } = require('./constants');
+const {
+  BINDING_MODES,
+  DEFAULT_BINDING_MODE_BY_MODE,
+  EFFECTS,
+  MATCH_DEFAULTS,
+  MODES,
+  RANKS,
+  RANK_VALUES,
+  ROUND_COUNTS,
+  SUITS
+} = require('./constants');
 const {
   createDeck,
   makeId,
@@ -8,6 +18,7 @@ const {
   shuffle,
   sortHand
 } = require('./cardUtils');
+const { enabledLocalRules, normalizeLocalRuleSettings } = require('./localRules');
 const { generateRandomRules } = require('./randomRules');
 const {
   describeCondition,
@@ -16,7 +27,6 @@ const {
   describeSuit,
   getTriggeredRules,
   normalizeRuleInput,
-  orderTriggeredRules,
   ruleSignature
 } = require('./ruleEngine');
 
@@ -108,6 +118,10 @@ function normalizeMode(mode) {
   return MODES[mode] ? mode : 'normal';
 }
 
+function normalizeBindingMode(mode) {
+  return BINDING_MODES[mode] ? mode : 'standard';
+}
+
 function normalizeHiddenRuleCount(count) {
   const numeric = Number(count);
   return [3, 5, 8, 10].includes(numeric) ? numeric : 5;
@@ -126,11 +140,18 @@ function updateSettings(room, playerId, settings) {
     throw new Error('ゲーム開始後は設定を変更できません');
   }
 
+  const previousMode = room.settings.mode;
   room.settings.mode = normalizeMode(settings.mode ?? room.settings.mode);
   room.settings.hiddenRuleCount = normalizeHiddenRuleCount(
     settings.hiddenRuleCount ?? room.settings.hiddenRuleCount
   );
   room.settings.roundCount = normalizeRoundCount(settings.roundCount ?? room.settings.roundCount);
+  const modeChanged = room.settings.mode !== previousMode;
+  room.settings.bindingMode = normalizeBindingMode(
+    settings.bindingMode ??
+      (modeChanged ? DEFAULT_BINDING_MODE_BY_MODE[room.settings.mode] : room.settings.bindingMode)
+  );
+  room.settings.localRules = normalizeLocalRuleSettings(settings.localRules ?? room.settings.localRules);
   addEvent(room, 'ゲーム設定を更新しました', 'system');
 }
 
@@ -198,6 +219,10 @@ function startGame(room, playerId, options = {}) {
   const mode = normalizeMode(room.settings.mode);
   const hiddenRuleCount = normalizeHiddenRuleCount(room.settings.hiddenRuleCount);
   const roundCount = normalizeRoundCount(room.settings.roundCount);
+  room.settings.bindingMode = normalizeBindingMode(
+    room.settings.bindingMode || DEFAULT_BINDING_MODE_BY_MODE[mode]
+  );
+  room.settings.localRules = normalizeLocalRuleSettings(room.settings.localRules);
 
   if (mode === 'chaos' || mode === 'mystery') {
     const existingSignatures = room.rules.map((rule) => ruleSignature(rule));
@@ -273,6 +298,7 @@ function startRound(room, options = {}) {
     forceLeadPlayerId: null,
     emptyTablePasses: [],
     emptyTableFirstPasserId: null,
+    autoPassDepth: 0,
     turnNumber: 1
   };
   room.match.ruleBuilding = null;
@@ -609,12 +635,6 @@ function cardsContainAnySuit(cards, suits) {
   return suits.some((suit) => cardsContainSuit(cards, suit));
 }
 
-function nextRank(rank) {
-  const index = RANKS.indexOf(rank);
-  if (index < 0 || index >= RANKS.length - 1) return null;
-  return RANKS[index + 1];
-}
-
 function activeBindings(player) {
   if (Array.isArray(player.bindings) && player.bindings.length > 0) {
     return player.bindings;
@@ -764,7 +784,7 @@ function bindingLabel(binding) {
     return `数字縛り: ${bindingRanksLabel(binding.ranks)}`;
   }
   if (binding.type === 'step') {
-    return `階段縛り: ${bindingRanksLabel(binding.ranks)}`;
+    return `数字縛り: ${bindingRanksLabel(binding.ranks)}`;
   }
   return '縛り';
 }
@@ -773,10 +793,15 @@ function bindingListLabel(bindings) {
   return bindings.map(bindingLabel).join('、') || '縛り';
 }
 
-function logNoLegalPlayIfBound(room, player) {
+function logNoLegalPlay(room, player) {
+  if (hasLegalPlay(room, player)) {
+    return;
+  }
   const bindings = activeBindings(player);
-  if (bindings.length > 0 && !hasLegalPlay(room, player)) {
+  if (bindings.length > 0) {
     addEvent(room, `${player.name}さんは${bindingListLabel(bindings)}により出せるカードがありません`, 'rule');
+  } else {
+    addEvent(room, `${player.name}さんは出せるカードがありません`, 'rule');
   }
 }
 
@@ -832,19 +857,64 @@ function recoverFromEmptyTablePassLoop(room) {
   setCurrentPlayerWithSkips(room, leadId);
 }
 
-function bindingForEffect(effect, play) {
+function bindingForEffect(effect, play, effectConfig = {}) {
   if (effect === 'bindSuit') {
     const suits = [...play.playedSuits];
     return suits.length > 0 ? { type: 'suit', suits } : null;
   }
   if (effect === 'bindRank') {
-    return { type: 'rank', ranks: [play.effectiveRank] };
-  }
-  if (effect === 'bindStep') {
-    const rank = nextRank(play.effectiveRank);
-    return { type: 'step', ranks: rank ? [rank] : [] };
+    const rank = effectConfig.bindRank || play.effectiveRank;
+    return RANKS.includes(rank) ? { type: 'rank', ranks: [rank] } : null;
   }
   return null;
+}
+
+function addBindingToPlayer(room, target, binding) {
+  if (!binding) return;
+
+  let nextBindings = [...activeBindings(target)];
+  if (normalizeBindingMode(room.settings?.bindingMode) === 'standard') {
+    nextBindings = nextBindings.filter((candidate) => candidate.type !== binding.type);
+  }
+  nextBindings.push(binding);
+  target.bindings = nextBindings;
+  target.bindingSuit = target.bindings.find((candidate) => candidate.type === 'suit')?.suits?.[0] || null;
+}
+
+function effectOrderValue(effect) {
+  if (effect === 'discard') return 5;
+  return EFFECTS[effect]?.order ?? 999;
+}
+
+function sortTriggeredRulesForQueue(rules) {
+  return [...rules].sort((a, b) => {
+    const orderDiff = effectOrderValue(a.effect) - effectOrderValue(b.effect);
+    if (orderDiff !== 0) return orderDiff;
+    return (a.order || 0) - (b.order || 0);
+  });
+}
+
+function localRuleToTriggeredRule(localRule) {
+  return {
+    id: localRule.ruleId,
+    localRuleId: localRule.id,
+    source: 'local',
+    locked: true,
+    generated: false,
+    condition: localRule.condition,
+    target: localRule.target,
+    effect: localRule.effect,
+    effectConfig: {},
+    count: localRule.count || 1,
+    order: localRule.order || effectOrderValue(localRule.effect),
+    description: localRule.description,
+    label: localRule.label
+  };
+}
+
+function triggeredLocalRules(room, play) {
+  const localRules = enabledLocalRules(room.settings?.localRules).map(localRuleToTriggeredRule);
+  return getTriggeredRules(localRules, play);
 }
 
 function playCards(room, playerId, cardIds) {
@@ -891,7 +961,9 @@ function playCards(room, playerId, cardIds) {
     addEvent(room, `${player.name}さんの縛りが解除されました`, 'rule');
   }
 
-  const triggeredRules = orderTriggeredRules(getTriggeredRules(room.rules, play));
+  const triggeredRules = dedupeMeaninglessEffects(
+    sortTriggeredRulesForQueue([...triggeredLocalRules(room, play), ...getTriggeredRules(room.rules, play)])
+  );
   for (const rule of triggeredRules) {
     if (rule.secret && !rule.revealed) {
       rule.revealed = true;
@@ -901,16 +973,34 @@ function playCards(room, playerId, cardIds) {
     room.game.effectQueue.push({
       id: makeId('effect'),
       ruleId: rule.id,
+      localRuleId: rule.localRuleId || null,
+      source: rule.source || 'custom',
       actorId: playerId,
       effect: rule.effect,
       target: rule.target,
       condition: rule.condition,
-      binding: bindingForEffect(rule.effect, play),
+      effectConfig: rule.effectConfig || {},
+      count: rule.count || 1,
+      binding: bindingForEffect(rule.effect, play, rule.effectConfig || {}),
       selectedTargetIds: null
     });
   }
 
   continueEffectQueue(room);
+}
+
+function dedupeMeaninglessEffects(rules) {
+  let clearSeen = false;
+  return rules.filter((rule) => {
+    if (rule.effect !== 'clear') {
+      return true;
+    }
+    if (clearSeen) {
+      return false;
+    }
+    clearSeen = true;
+    return true;
+  });
 }
 
 function passTurn(room, playerId) {
@@ -926,36 +1016,52 @@ function passTurn(room, playerId) {
     throw new Error('参加中のプレイヤーではありません');
   }
 
+  performPass(room, playerId, { automatic: false });
+}
+
+function performPass(room, playerId, options = {}) {
+  const automatic = Boolean(options.automatic);
+  const player = requirePlayer(room, playerId);
+  const noLegalPlay = !hasLegalPlay(room, player);
+
+  if (automatic && !noLegalPlay) {
+    return false;
+  }
+
   if (!room.game.table) {
-    if (!hasActiveBindings(player)) {
+    if (!automatic && !hasActiveBindings(player)) {
       throw new Error('場が空のときはカードを出してください');
     }
+    if (automatic && !noLegalPlay) {
+      return false;
+    }
 
-    logNoLegalPlayIfBound(room, player);
+    logNoLegalPlay(room, player);
     clearBindingsAfterActionWithEvent(room, player);
-    addEvent(room, `${player.name}さんがパスしました`, 'pass');
+    addEvent(room, `${player.name}さんが${automatic ? '自動パス' : 'パス'}しました`, 'pass');
     recordEmptyTablePass(room, playerId);
 
     if (allActivePlayersPassedEmptyTable(room)) {
       recoverFromEmptyTablePassLoop(room);
-      return;
+      return true;
     }
 
     setCurrentPlayerWithSkips(room, nextActivePlayerId(room, playerId));
-    return;
+    return true;
   }
 
-  logNoLegalPlayIfBound(room, player);
+  logNoLegalPlay(room, player);
   clearBindingsAfterActionWithEvent(room, player);
   room.game.passes = [...new Set([...room.game.passes, playerId])];
-  addEvent(room, `${player.name}さんがパスしました`, 'pass');
+  addEvent(room, `${player.name}さんが${automatic ? '自動パス' : 'パス'}しました`, 'pass');
 
   if (shouldClearBecauseAllOthersPassed(room)) {
     clearTableAfterPasses(room);
-    return;
+    return true;
   }
 
   setCurrentPlayerWithSkips(room, nextActivePlayerId(room, playerId));
+  return true;
 }
 
 function continueEffectQueue(room) {
@@ -984,6 +1090,24 @@ function continueEffectQueue(room) {
       return;
     }
 
+    if (effectAction.effect === 'gift') {
+      const group = collectReadyGiftGroup(room, effectAction);
+      const result = applyGiftGroup(room, group.actions, group.targets);
+      if (result === 'pending') {
+        return;
+      }
+      continue;
+    }
+
+    if (effectAction.effect === 'discard') {
+      game.effectQueue.shift();
+      const result = applyDiscardEffect(room, effectAction);
+      if (result === 'pending') {
+        return;
+      }
+      continue;
+    }
+
     const targets = resolveTargets(room, effectAction);
     const result = applyEffect(room, effectAction, targets);
     if (result === 'pending') {
@@ -996,6 +1120,34 @@ function continueEffectQueue(room) {
   game.phase = 'playing';
   game.pendingAction = null;
   completeResolvedAction(room);
+}
+
+function collectReadyGiftGroup(room, firstAction) {
+  const firstTargets = resolveTargets(room, firstAction);
+  const target = firstTargets[0] || null;
+  if (!target || firstTargets.length !== 1) {
+    room.game.effectQueue = room.game.effectQueue.filter((action) => action.id !== firstAction.id);
+    return { actions: [firstAction], targets: firstTargets };
+  }
+
+  const matchedIds = new Set();
+  const actions = [];
+  for (const action of room.game.effectQueue) {
+    if (action.effect !== 'gift' || action.actorId !== firstAction.actorId) {
+      continue;
+    }
+    if (action.target === 'any' && !action.selectedTargetIds) {
+      continue;
+    }
+    const targets = resolveTargets(room, action);
+    if (targets.length === 1 && targets[0].id === target.id) {
+      matchedIds.add(action.id);
+      actions.push(action);
+    }
+  }
+
+  room.game.effectQueue = room.game.effectQueue.filter((action) => !matchedIds.has(action.id));
+  return { actions, targets: [target] };
 }
 
 function chooseTarget(room, playerId, pendingId, targetPlayerId) {
@@ -1018,7 +1170,7 @@ function chooseTarget(room, playerId, pendingId, targetPlayerId) {
   continueEffectQueue(room);
 }
 
-function chooseTransferCard(room, playerId, pendingId, cardId) {
+function chooseTransferCard(room, playerId, pendingId, cardIds) {
   if (room.status !== 'playing' || room.game.phase !== 'awaitingGiftCard') {
     throw new Error('渡すカードの選択待ちではありません');
   }
@@ -1034,15 +1186,55 @@ function chooseTransferCard(room, playerId, pendingId, cardId) {
     throw new Error('上がったプレイヤーにはカードを渡せません');
   }
 
-  const [card] = pickCardsFromHand(actor.hand, [cardId]);
-  actor.hand = removeCardsFromHand(actor.hand, [cardId]);
-  target.hand = sortHand([...target.hand, card]);
+  const selectedIds = normalizeCardIdList(cardIds);
+  const requiredCount = pending.requiredCount || 1;
+  if (selectedIds.length !== requiredCount) {
+    throw new Error(`${requiredCount}枚選んでください`);
+  }
 
-  addEvent(room, `${actor.name}さんが${target.name}さんへカードを1枚渡しました`, 'rule');
-  room.game.effectQueue.shift();
+  const cards = pickCardsFromHand(actor.hand, selectedIds);
+  actor.hand = sortHand(removeCardsFromHand(actor.hand, selectedIds));
+  target.hand = sortHand([...target.hand, ...cards]);
+
+  addEvent(room, `${actor.name}さんが${target.name}さんへカードを${cards.length}枚渡しました`, 'rule');
   room.game.phase = 'playing';
   room.game.pendingAction = null;
   continueEffectQueue(room);
+}
+
+function chooseDiscardCards(room, playerId, pendingId, cardIds) {
+  if (room.status !== 'playing' || room.game.phase !== 'awaitingDiscardCard') {
+    throw new Error('捨てるカードの選択待ちではありません');
+  }
+
+  const pending = room.game.pendingAction;
+  if (pending.id !== pendingId || pending.actorId !== playerId) {
+    throw new Error('このカード選択は操作できません');
+  }
+
+  const actor = requirePlayer(room, playerId);
+  const selectedIds = normalizeCardIdList(cardIds);
+  const requiredCount = pending.requiredCount || 1;
+  if (selectedIds.length !== requiredCount) {
+    throw new Error(`${requiredCount}枚選んでください`);
+  }
+
+  const cards = pickCardsFromHand(actor.hand, selectedIds);
+  actor.hand = sortHand(removeCardsFromHand(actor.hand, selectedIds));
+
+  addEvent(
+    room,
+    `${actor.name}さんが追加で${cards.map((card) => publicCard(card).label).join(' ')}を捨てました`,
+    'rule'
+  );
+  room.game.phase = 'playing';
+  room.game.pendingAction = null;
+  continueEffectQueue(room);
+}
+
+function normalizeCardIdList(cardIds) {
+  const ids = Array.isArray(cardIds) ? cardIds : [cardIds];
+  return [...new Set(ids.filter(Boolean).map(String))];
 }
 
 function resolveTargets(room, effectAction) {
@@ -1084,6 +1276,68 @@ function eligibleAnyTargets(room, effectAction) {
   });
 }
 
+function effectGroupLabel(room, effectActions) {
+  return effectActions.map((action) => effectLabel(room, action)).join(' + ');
+}
+
+function applyGiftGroup(room, effectActions, targets) {
+  const game = room.game;
+  const actor = requirePlayer(room, effectActions[0].actorId);
+  const label = effectGroupLabel(room, effectActions);
+  const totalCount = effectActions.reduce((sum, action) => sum + (action.count || 1), 0);
+
+  if (targets.length === 0) {
+    addEvent(room, `${label}: 対象がいないため不発になりました`, 'rule');
+    return 'done';
+  }
+  if (actor.hand.length === 0) {
+    addEvent(room, `${label}: 渡せるカードがないため不発になりました`, 'rule');
+    return 'done';
+  }
+
+  const requiredCount = Math.min(totalCount, actor.hand.length);
+  game.phase = 'awaitingGiftCard';
+  game.pendingAction = {
+    id: effectActions[0].id,
+    type: 'giftCard',
+    actorId: actor.id,
+    ruleIds: effectActions.map((action) => action.ruleId),
+    effect: 'gift',
+    targetPlayerId: targets[0].id,
+    requiredCount
+  };
+  addEvent(
+    room,
+    `${label}: ${actor.name}さんが${targets[0].name}さんへ渡すカード${requiredCount}枚を選択中です`,
+    'rule'
+  );
+  return 'pending';
+}
+
+function applyDiscardEffect(room, effectAction) {
+  const game = room.game;
+  const actor = requirePlayer(room, effectAction.actorId);
+  const count = effectAction.count || 1;
+
+  if (actor.hand.length === 0) {
+    addEvent(room, `${effectLabel(room, effectAction)}: 捨てられるカードがないため不発になりました`, 'rule');
+    return 'done';
+  }
+
+  const requiredCount = Math.min(count, actor.hand.length);
+  game.phase = 'awaitingDiscardCard';
+  game.pendingAction = {
+    id: effectAction.id,
+    type: 'discardCard',
+    actorId: actor.id,
+    ruleId: effectAction.ruleId,
+    effect: 'discard',
+    requiredCount
+  };
+  addEvent(room, `${effectLabel(room, effectAction)}: ${actor.name}さんが捨てるカードを選択中です`, 'rule');
+  return 'pending';
+}
+
 function applyEffect(room, effectAction, targets) {
   const game = room.game;
   const actor = requirePlayer(room, effectAction.actorId);
@@ -1106,15 +1360,14 @@ function applyEffect(room, effectAction, targets) {
     return 'done';
   }
 
-  if (['bindSuit', 'bindRank', 'bindStep'].includes(effectAction.effect)) {
+  if (['bindSuit', 'bindRank'].includes(effectAction.effect)) {
     const binding = effectAction.binding;
     if (!binding) {
       addEvent(room, `${effectLabel(room, effectAction)}: 縛れる内容がないため不発になりました`, 'rule');
       return 'done';
     }
     for (const target of targets) {
-      target.bindings = [...activeBindings(target), binding].filter(Boolean);
-      target.bindingSuit = target.bindings.find((candidate) => candidate.type === 'suit')?.suits?.[0] || null;
+      addBindingToPlayer(room, target, binding);
     }
     addEvent(
       room,
@@ -1162,6 +1415,12 @@ function applyEffect(room, effectAction, targets) {
 }
 
 function effectLabel(room, effectAction) {
+  if (effectAction.source === 'local') {
+    const localRule = enabledLocalRules(room.settings?.localRules).find(
+      (candidate) => candidate.id === effectAction.localRuleId
+    );
+    return localRule?.label || 'ローカルルール';
+  }
   const rule = room.rules.find((candidate) => candidate.id === effectAction.ruleId);
   if (!rule) {
     return describeEffect(effectAction.effect);
@@ -1264,10 +1523,44 @@ function setCurrentPlayerWithSkips(room, candidateId) {
 
     game.currentPlayerId = player.id;
     game.turnNumber += 1;
+    autoPassCurrentIfNeeded(room);
     return;
   }
 
   finishGameIfReady(room);
+}
+
+function autoPassCurrentIfNeeded(room) {
+  const game = room.game;
+  if (
+    room.status !== 'playing' ||
+    !game ||
+    game.phase !== 'playing' ||
+    game.pendingAction ||
+    isGamePaused(room)
+  ) {
+    return false;
+  }
+
+  const player = currentTurnPlayer(room);
+  if (!player || player.left || player.finishedRank || hasLegalPlay(room, player)) {
+    return false;
+  }
+
+  game.autoPassDepth = (game.autoPassDepth || 0) + 1;
+  if (game.autoPassDepth > room.players.length * 4) {
+    game.autoPassDepth -= 1;
+    recoverFromEmptyTablePassLoop(room);
+    return true;
+  }
+
+  try {
+    return performPass(room, player.id, { automatic: true });
+  } finally {
+    if (room.game) {
+      room.game.autoPassDepth = Math.max(0, (room.game.autoPassDepth || 1) - 1);
+    }
+  }
 }
 
 function shouldClearBecauseAllOthersPassed(room) {
@@ -1285,6 +1578,7 @@ function shouldAutoClearTable(room) {
 
   const challengers = activePlayers(room).filter((player) => player.id !== game.lastPlayBy);
   if (challengers.length === 0) return true;
+  if (challengers.some((player) => hasActiveBindings(player))) return false;
   return challengers.every((player) => !hasLegalPlay(room, player));
 }
 
@@ -1406,7 +1700,7 @@ function handlePlayingLeave(room, playerId) {
   }
 
   if (game.pendingAction?.type === 'giftCard' && game.pendingAction.targetPlayerId === playerId) {
-    game.effectQueue.shift();
+    removePendingActionFromQueueIfPresent(game);
     game.pendingAction = null;
     game.phase = 'playing';
     addEvent(room, '渡す相手が退出したため特殊ルールは不発になりました', 'rule');
@@ -1434,6 +1728,16 @@ function handlePlayingLeave(room, playerId) {
   }
 }
 
+function removePendingActionFromQueueIfPresent(game) {
+  const pendingId = game.pendingAction?.id;
+  if (!pendingId) return;
+  if (game.effectQueue[0]?.id === pendingId) {
+    game.effectQueue.shift();
+    return;
+  }
+  game.effectQueue = game.effectQueue.filter((action) => action.id !== pendingId);
+}
+
 function handleRuleBuildingLeave(room, playerId) {
   const ruleBuilding = room.match?.ruleBuilding;
   if (!ruleBuilding) return;
@@ -1456,6 +1760,7 @@ module.exports = {
   analyzePlay,
   beginRuleBuilding,
   chooseTarget,
+  chooseDiscardCards,
   chooseTransferCard,
   directionLabel,
   endGame,

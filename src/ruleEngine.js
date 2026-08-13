@@ -38,9 +38,9 @@ function normalizeRuleInput(input) {
   const rankRelation = normalizeNullable(condition.rankRelation);
   const suitRelation = normalizeNullable(condition.suitRelation);
   const effect = input?.effect;
-  const effectConfig = EFFECTS[effect];
+  const effectDefinition = EFFECTS[effect];
 
-  if (!effectConfig) {
+  if (!effectDefinition) {
     throw new Error('存在しない効果です');
   }
   if (rank !== null && !VALID_RANKS.has(rank)) {
@@ -65,17 +65,35 @@ function normalizeRuleInput(input) {
     throw new Error('少なくとも1つの条件を指定してください');
   }
 
-  let target = normalizeTarget(input?.target) || effectConfig.targets[0];
-  if (effectConfig.targets.length === 1 && effectConfig.targets[0] === 'none') {
+  let target = normalizeTarget(input?.target) || effectDefinition.targets[0];
+  if (effectDefinition.targets.length === 1 && effectDefinition.targets[0] === 'none') {
     target = 'none';
   }
+  const normalizedEffectConfig = normalizeEffectConfig(effect, input?.effectConfig || {});
   const normalized = {
     condition: { rank, suit, count, rankRelation, suitRelation },
     target,
-    effect
+    effect,
+    effectConfig: normalizedEffectConfig
   };
 
   validateRuleBalance(normalized);
+  return normalized;
+}
+
+function normalizeEffectConfig(effect, config) {
+  const normalized = {};
+
+  if (effect === 'bindRank') {
+    const bindRank = normalizeNullable(config.bindRank);
+    if (bindRank !== null) {
+      if (!RANKS.includes(bindRank)) {
+        throw new Error('数字縛りの指定数字が不正です');
+      }
+      normalized.bindRank = bindRank;
+    }
+  }
+
   return normalized;
 }
 
@@ -204,7 +222,9 @@ function getTriggeredRules(rules, play) {
 
 function orderTriggeredRules(rules) {
   return [...rules].sort((a, b) => {
-    const orderDiff = EFFECTS[a.effect].order - EFFECTS[b.effect].order;
+    const aOrder = EFFECTS[a.effect]?.order ?? a.order ?? 999;
+    const bOrder = EFFECTS[b.effect]?.order ?? b.order ?? 999;
+    const orderDiff = aOrder - bOrder;
     if (orderDiff !== 0) return orderDiff;
     return (a.order || 0) - (b.order || 0);
   });
@@ -218,7 +238,8 @@ function ruleSignature(rule) {
     rule.condition.rankRelation || '*',
     rule.condition.suitRelation || '*',
     rule.target,
-    rule.effect
+    rule.effect,
+    rule.effectConfig?.bindRank || '*'
   ].join('|');
 }
 
@@ -240,10 +261,10 @@ function describeCondition(condition) {
 
   const relationParts = [];
   if (condition.rankRelation === 'plusOne') {
-    relationParts.push('直前より+1');
+    relationParts.push('直前のプレイより1つ上の数字');
   }
   if (condition.suitRelation === 'same') {
-    relationParts.push('直前と同じスート');
+    relationParts.push('直前のプレイと同じスート');
   }
 
   if (cardText && relationParts.length > 0) {
@@ -256,7 +277,10 @@ function describeTarget(target) {
   return TARGETS[target]?.label || target;
 }
 
-function describeEffect(effect) {
+function describeEffect(effect, effectConfig = {}) {
+  if (effect === 'bindRank' && effectConfig.bindRank) {
+    return `数字縛り（${effectConfig.bindRank}）`;
+  }
   return EFFECTS[effect]?.label || effect;
 }
 
@@ -266,7 +290,7 @@ function describeRule(rule) {
   }
 
   const conditionText = describeCondition(rule.condition);
-  const effectText = describeEffect(rule.effect);
+  const effectText = describeEffect(rule.effect, rule.effectConfig);
   if (rule.target === 'none') {
     return `${conditionText} → ${effectText}`;
   }
@@ -287,6 +311,7 @@ function validConnectorsForEffect(effect) {
 
 module.exports = {
   calculateConditionPower,
+  conditionMatchesPlay,
   conditionUnlocksTarget,
   describeCondition,
   describeEffect,

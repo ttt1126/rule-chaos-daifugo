@@ -4,6 +4,7 @@ const assert = require('node:assert/strict');
 const {
   addRule,
   beginRuleBuilding,
+  chooseDiscardCards,
   chooseTarget,
   chooseTransferCard,
   endGame,
@@ -22,6 +23,7 @@ const {
   getTriggeredRules,
   normalizeRuleInput
 } = require('../src/ruleEngine');
+const { generateRandomRules } = require('../src/randomRules');
 
 function card(id, rank, suit) {
   return { id, rank, suit, joker: false };
@@ -49,7 +51,13 @@ function makeRoom(hands) {
     code: 'TEST1',
     hostId: players[0].id,
     status: 'playing',
-    settings: { mode: 'normal', hiddenRuleCount: 5, roundCount: 4 },
+    settings: {
+      mode: 'normal',
+      hiddenRuleCount: 5,
+      roundCount: 4,
+      bindingMode: 'standard',
+      localRules: { eightCut: false, fiveSkip: false, sevenGift: false, tenDiscard: false }
+    },
     players,
     rules: [],
     events: [],
@@ -69,6 +77,7 @@ function makeRoom(hands) {
       forceLeadPlayerId: null,
       emptyTablePasses: [],
       emptyTableFirstPasserId: null,
+      autoPassDepth: 0,
       turnNumber: 1
     }
   };
@@ -108,7 +117,7 @@ test('効果と対象属性の互換性を判定できる', () => {
   assert.equal(effectSupportsTarget('bindSuit', 'any'), true);
   assert.equal(effectSupportsTarget('bindSuit', 'all'), true);
   assert.equal(effectSupportsTarget('bindRank', 'all'), true);
-  assert.equal(effectSupportsTarget('bindStep', 'all'), true);
+  assert.equal(effectSupportsTarget('bindStep', 'all'), false);
   assert.equal(effectSupportsTarget('gift', 'next'), true);
   assert.equal(effectSupportsTarget('gift', 'any'), true);
   assert.equal(effectSupportsTarget('gift', 'self'), false);
@@ -143,7 +152,7 @@ test('4段コネクタの成立と不成立をサーバー側で検証する', (
   );
 });
 
-test('直前より+1条件は通常ランク順で成立し、2から3へ循環しない', () => {
+test('1つ上の数字条件は通常ランク順で成立し、2から3へ循環しない', () => {
   const rule = normalizeRuleInput({
     condition: { rankRelation: 'plusOne' },
     effect: 'skip',
@@ -157,7 +166,7 @@ test('直前より+1条件は通常ランク順で成立し、2から3へ循環�
   assert.equal(getTriggeredRules([rule], { effectiveRank: '7', previousRank: null, ruleSuits: new Set(), count: 1 }).length, 0);
 });
 
-test('直前と同じスート条件は共通スートがある場合だけ成立する', () => {
+test('同スート条件は共通スートがある場合だけ成立する', () => {
   const rule = normalizeRuleInput({
     condition: { suitRelation: 'same' },
     effect: 'skip',
@@ -363,7 +372,7 @@ test('直前条件は場流し後の先頭プレイでは発動しない', () =>
   assert.equal(room.game.direction, 1);
 });
 
-test('JOKERを通常カードと混ぜた有効数字で直前より+1条件が成立する', () => {
+test('JOKERを通常カードと混ぜた有効数字で1つ上の数字条件が成立する', () => {
   const room = makeRoom({
     p1: [card('a', '7', 'S'), card('b', '7', 'H'), card('x', '9', 'S')],
     p2: [card('c', '8', 'S'), joker()]
@@ -422,7 +431,7 @@ test('スート縛りは発動プレイのスートを要求し、パスでも�
   assert.equal(room.players.find((player) => player.id === 'p2').bindings.length, 0);
 });
 
-test('数字縛りは発動プレイと同じ数字だけを合法にする', () => {
+test('数字縛りは指定数字だけを合法にする', () => {
   const room = makeRoom({
     p1: [card('a', '7', 'S'), card('b', '9', 'C')],
     p2: [card('c', '8', 'H'), card('d', '9', 'H')]
@@ -431,11 +440,13 @@ test('数字縛りは発動プレイと同じ数字だけを合法にする', ()
   addRule(room, 'p1', {
     condition: { rank: '7', suit: 'S' },
     effect: 'bindRank',
-    target: 'next'
+    target: 'next',
+    effectConfig: { bindRank: '9' }
   }, { system: true });
 
   playCards(room, 'p1', ['a']);
   assert.equal(room.players.find((player) => player.id === 'p2').bindings[0].type, 'rank');
+  assert.deepEqual(room.players.find((player) => player.id === 'p2').bindings[0].ranks, ['9']);
   room.game.currentPlayerId = 'p2';
   room.game.table = null;
   room.game.lastPlayBy = null;
@@ -444,39 +455,64 @@ test('数字縛りは発動プレイと同じ数字だけを合法にする', ()
   assert.equal(room.players.find((player) => player.id === 'p2').bindings.length, 0);
 });
 
-test('階段縛りは発動数字の1つ上だけを合法にし、2ならパスのみになる', () => {
+test('階段縛りは新規ルールとして作成できない', () => {
+  const room = makeRoom({
+    p1: [card('a', '7', 'S')],
+    p2: [card('c', '8', 'H')]
+  });
+
+  assert.throws(
+    () =>
+      addRule(room, 'p1', {
+        condition: { rank: '7', suit: 'S' },
+        effect: 'bindStep',
+        target: 'next'
+      }, { system: true }),
+    /存在しない効果/
+  );
+});
+
+test('縛り競合は標準では同種上書き、カオスではANDで自動パスになる', () => {
   const room = makeRoom({
     p1: [card('a', '7', 'S'), card('b', '2', 'C')],
-    p2: [card('c', '9', 'H'), card('d', '8', 'H')]
+    p2: [card('c', '9', 'H'), card('d', '10', 'H')]
   });
 
   addRule(room, 'p1', {
     condition: { rank: '7', suit: 'S' },
-    effect: 'bindStep',
-    target: 'next'
+    effect: 'bindRank',
+    target: 'next',
+    effectConfig: { bindRank: '9' }
   }, { system: true });
-
+  addRule(room, 'p1', {
+    condition: { rank: '7', count: 1 },
+    effect: 'bindRank',
+    target: 'next',
+    effectConfig: { bindRank: '10' }
+  }, { system: true });
   playCards(room, 'p1', ['a']);
-  assert.equal(room.players.find((player) => player.id === 'p2').bindings[0].ranks[0], '8');
-  assert.throws(() => playCards(room, 'p2', ['c']), /階段縛り/);
-  playCards(room, 'p2', ['d']);
+  assert.deepEqual(room.players.find((player) => player.id === 'p2').bindings.map((binding) => binding.ranks[0]), ['10']);
 
-  const room2 = makeRoom({
-    p1: [card('e', '2', 'S'), card('g', '4', 'C')],
-    p2: [card('f', '3', 'H')]
+  const chaosRoom = makeRoom({
+    p1: [card('e', '7', 'S'), card('g', '4', 'C')],
+    p2: [card('f', '9', 'H'), card('h', '10', 'H')]
   });
-  addRule(room2, 'p1', {
-    condition: { rank: '2', suit: 'S' },
-    effect: 'bindStep',
-    target: 'next'
+  chaosRoom.settings.bindingMode = 'chaos';
+  addRule(chaosRoom, 'p1', {
+    condition: { rank: '7', suit: 'S' },
+    effect: 'bindRank',
+    target: 'next',
+    effectConfig: { bindRank: '9' }
   }, { system: true });
-  playCards(room2, 'p1', ['e']);
-  assert.equal(room2.players.find((player) => player.id === 'p2').bindings[0].ranks.length, 0);
-  room2.game.currentPlayerId = 'p2';
-  room2.game.table = null;
-  room2.game.lastPlayBy = null;
-  passTurn(room2, 'p2');
-  assert.equal(room2.players.find((player) => player.id === 'p2').bindings.length, 0);
+  addRule(chaosRoom, 'p1', {
+    condition: { rank: '7', count: 1 },
+    effect: 'bindRank',
+    target: 'next',
+    effectConfig: { bindRank: '10' }
+  }, { system: true });
+  playCards(chaosRoom, 'p1', ['e']);
+  assert.equal(chaosRoom.players.find((player) => player.id === 'p2').bindings.length, 0);
+  assert.match(chaosRoom.events.map((event) => event.text).join('\n'), /自動パス/);
 });
 
 test('複数縛りはAND条件として扱う', () => {
@@ -518,7 +554,7 @@ test('場が空でスート縛りの合法手がない場合はパスできる',
   assert.match(room.events.map((event) => event.text).join('\n'), /出せるカードがありません/);
 });
 
-test('場が空で数字縛り・階段縛りの合法手がない場合もパスできる', () => {
+test('場が空で数字縛り・旧階段縛り互換の合法手がない場合もパスできる', () => {
   const rankRoom = makeRoom({
     p1: [card('a', '4', 'H')],
     p2: [card('b', '5', 'S')]
@@ -666,6 +702,90 @@ test('渡すは対象決定後にサーバー上の手札を移動する', () =>
 
   assert.equal(room.players.find((player) => player.id === 'p1').hand.length, 0);
   assert.equal(room.players.find((player) => player.id === 'p3').hand.some((held) => held.id === 'b'), true);
+});
+
+test('同じ対象への渡すは合算して一度に選択する', () => {
+  const room = makeRoom({
+    p1: [card('a', '7', 'S'), card('b', '9', 'C'), card('e', '10', 'C'), card('f', '3', 'C')],
+    p2: [card('c', '8', 'H')],
+    p3: [card('d', 'J', 'H')]
+  });
+  room.settings.localRules.sevenGift = true;
+
+  addRule(room, 'p1', {
+    condition: { rank: '7', count: 1 },
+    effect: 'gift',
+    target: 'next'
+  }, { system: true });
+
+  playCards(room, 'p1', ['a']);
+
+  assert.equal(room.game.phase, 'awaitingGiftCard');
+  assert.equal(room.game.pendingAction.requiredCount, 2);
+  chooseTransferCard(room, 'p1', room.game.pendingAction.id, ['b', 'e']);
+  assert.equal(room.players.find((player) => player.id === 'p2').hand.length, 3);
+});
+
+test('ローカルルールの8切りは場を流して発動者を先頭にする', () => {
+  const room = makeRoom({
+    p1: [card('a', '8', 'S'), card('b', '3', 'C')],
+    p2: [card('c', '9', 'H')],
+    p3: [card('d', '10', 'H')]
+  });
+  room.settings.localRules.eightCut = true;
+
+  playCards(room, 'p1', ['a']);
+
+  assert.equal(room.game.table, null);
+  assert.equal(room.game.currentPlayerId, 'p1');
+  assert.match(room.events.map((event) => event.text).join('\n'), /8切り: 場が流れました/);
+});
+
+test('ローカルルールの5飛びは次の有効プレイヤーを1人スキップする', () => {
+  const room = makeRoom({
+    p1: [card('a', '5', 'S'), card('b', '3', 'C')],
+    p2: [card('c', '6', 'H')],
+    p3: [card('d', '7', 'H')]
+  });
+  room.settings.localRules.fiveSkip = true;
+
+  playCards(room, 'p1', ['a']);
+
+  assert.equal(room.game.currentPlayerId, 'p3');
+  assert.match(room.events.map((event) => event.text).join('\n'), /P2さんのターンがスキップされました/);
+});
+
+test('ローカルルールの10捨ては追加捨て待ちになり、捨てたカードでは追加発動しない', () => {
+  const room = makeRoom({
+    p1: [card('a', '10', 'S'), card('b', '8', 'C'), card('e', '3', 'C')],
+    p2: [card('c', 'J', 'H')],
+    p3: [card('d', 'Q', 'H')]
+  });
+  room.settings.localRules.tenDiscard = true;
+  room.settings.localRules.eightCut = true;
+
+  playCards(room, 'p1', ['a']);
+
+  assert.equal(room.game.phase, 'awaitingDiscardCard');
+  chooseDiscardCards(room, 'p1', room.game.pendingAction.id, ['b']);
+  assert.notEqual(room.game.table, null);
+  assert.equal(room.players.find((player) => player.id === 'p1').hand.some((held) => held.id === 'b'), false);
+});
+
+test('カオス生成は階段縛りを作らず、1〜2条件中心に生成する', () => {
+  let seed = 1;
+  const rng = () => {
+    seed = (seed * 48271) % 0x7fffffff;
+    return seed / 0x7fffffff;
+  };
+  const rules = generateRandomRules(10, { rng });
+  const slotCounts = rules.map((rule) =>
+    ['rank', 'suit', 'count', 'rankRelation', 'suitRelation'].filter((key) => Boolean(rule.condition[key])).length
+  );
+
+  assert.equal(rules.some((rule) => rule.effect === 'bindStep'), false);
+  assert.equal(slotCounts.every((count) => count >= 1 && count <= 3), true);
+  assert.equal(slotCounts.filter((count) => count <= 2).length >= 7, true);
 });
 
 test('隠しルールは発動後に公開される', () => {

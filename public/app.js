@@ -46,11 +46,6 @@ const EFFECT_CONFIGS = {
     connectors: ['SELF', 'NEXT', 'CHOICE', 'GLOBAL'],
     targets: ['self', 'next', 'any', 'all']
   },
-  bindStep: {
-    label: '階段縛り',
-    connectors: ['SELF', 'NEXT', 'CHOICE', 'GLOBAL'],
-    targets: ['self', 'next', 'any', 'all']
-  },
   reverse: {
     label: 'リバース',
     connectors: ['GLOBAL'],
@@ -83,6 +78,7 @@ let session = loadSession();
 let roomState = null;
 let selectedCardIds = new Set();
 let selectedGiftCardIds = new Set();
+let selectedDiscardCardIds = new Set();
 let seenEventIds = new Set();
 let ruleNotices = [];
 let ruleNoticeTimer = null;
@@ -91,7 +87,8 @@ let message = '';
 let ruleDraft = {
   condition: { rank: '', suit: '', count: '', rankRelation: '', suitRelation: '' },
   target: 'next',
-  effect: 'skip'
+  effect: 'skip',
+  effectConfig: { bindRank: '' }
 };
 
 const app = document.getElementById('app');
@@ -115,6 +112,7 @@ function connectSocket() {
     roomState = nextState;
     trimSelectedCards();
     trimSelectedGiftCards();
+    trimSelectedDiscardCards();
     render();
   });
 
@@ -202,6 +200,10 @@ document.addEventListener('click', (event) => {
       return;
     }
     ruleDraft.effect = button.dataset.effect;
+    ruleDraft.effectConfig = ruleDraft.effectConfig || { bindRank: '' };
+    if (ruleDraft.effect !== 'bindRank') {
+      ruleDraft.effectConfig.bindRank = '';
+    }
     normalizeRuleDraftTarget(true);
     render();
   }
@@ -229,12 +231,23 @@ document.addEventListener('click', (event) => {
   }
   if (action === 'confirm-gift-card') {
     const pending = roomState?.game?.pendingAction;
-    const [cardId] = selectedGiftCardIds;
     emitAuthed('chooseTransferCard', {
       pendingId: pending?.id,
-      cardId
+      cardIds: [...selectedGiftCardIds]
     }, () => {
       selectedGiftCardIds.clear();
+    });
+  }
+  if (action === 'select-discard-card') {
+    toggleDiscardCard(button.dataset.cardId, Number(button.dataset.requiredCount || 1));
+  }
+  if (action === 'confirm-discard-card') {
+    const pending = roomState?.game?.pendingAction;
+    emitAuthed('chooseDiscardCards', {
+      pendingId: pending?.id,
+      cardIds: [...selectedDiscardCardIds]
+    }, () => {
+      selectedDiscardCardIds.clear();
     });
   }
 });
@@ -252,6 +265,8 @@ document.addEventListener('change', (event) => {
       }
     } else if (fieldName === 'rankRelation' || fieldName === 'suitRelation') {
       ruleDraft.condition[fieldName] = field.checked ? field.value : '';
+    } else if (fieldName === 'bindRankValue') {
+      ruleDraft.effectConfig.bindRank = field.value;
     } else {
       ruleDraft[fieldName] = field.value;
     }
@@ -265,9 +280,19 @@ document.addEventListener('change', (event) => {
     const settings = {
       mode: roomState.settings.mode,
       hiddenRuleCount: roomState.settings.hiddenRuleCount,
-      roundCount: roomState.settings.roundCount
+      roundCount: roomState.settings.roundCount,
+      bindingMode: roomState.settings.bindingMode,
+      localRules: { ...(roomState.settings.localRules || {}) }
     };
-    settings[field.dataset.setting] = field.value;
+    const settingName = field.dataset.setting;
+    if (settingName.startsWith('localRules.')) {
+      settings.localRules[settingName.split('.')[1]] = field.checked;
+    } else {
+      settings[settingName] = field.value;
+      if (settingName === 'mode') {
+        settings.bindingMode = field.value === 'chaos' ? 'chaos' : 'standard';
+      }
+    }
     emitAuthed('updateSettings', { settings });
   }
 });
@@ -287,7 +312,8 @@ document.addEventListener('click', (event) => {
         suitRelation: ruleDraft.condition.suitRelation || null
       },
       target: ruleDraft.target,
-      effect: ruleDraft.effect
+      effect: ruleDraft.effect,
+      effectConfig: { ...ruleDraft.effectConfig }
     }
   }, () => {
     resetRuleDraft();
@@ -331,6 +357,7 @@ function leaveLocalRoom(text) {
   roomState = null;
   selectedCardIds.clear();
   selectedGiftCardIds.clear();
+  selectedDiscardCardIds.clear();
   ruleNotices = [];
   seenEventIds.clear();
   localStorage.removeItem(STORAGE_KEY);
@@ -359,6 +386,12 @@ function trimSelectedGiftCards() {
   selectedGiftCardIds = new Set([...selectedGiftCardIds].filter((id) => validIds.has(id)));
 }
 
+function trimSelectedDiscardCards() {
+  const ownHand = roomState?.players.find((player) => player.isYou)?.hand || [];
+  const validIds = new Set(ownHand.map((card) => card.id));
+  selectedDiscardCardIds = new Set([...selectedDiscardCardIds].filter((id) => validIds.has(id)));
+}
+
 function toggleSelectedCard(cardId) {
   if (selectedCardIds.has(cardId)) {
     selectedCardIds.delete(cardId);
@@ -373,6 +406,15 @@ function toggleGiftCard(cardId, requiredCount = 1) {
     selectedGiftCardIds.delete(cardId);
   } else {
     selectedGiftCardIds = new Set([cardId, ...selectedGiftCardIds].slice(0, requiredCount));
+  }
+  render();
+}
+
+function toggleDiscardCard(cardId, requiredCount = 1) {
+  if (selectedDiscardCardIds.has(cardId)) {
+    selectedDiscardCardIds.delete(cardId);
+  } else {
+    selectedDiscardCardIds = new Set([cardId, ...selectedDiscardCardIds].slice(0, requiredCount));
   }
   render();
 }
@@ -409,7 +451,7 @@ function collectRuleNotices(nextState) {
 
 function isRuleNoticeEvent(event) {
   const text = String(event.text || '');
-  return event.type === 'rule' && (text.includes('ルール:') || text.includes('隠しルールが発動'));
+  return event.type === 'rule' && (text.includes(':') || text.includes('隠しルールが発動'));
 }
 
 function showMessage(text) {
@@ -523,6 +565,16 @@ function renderRulesHelp() {
             <li>条件、対象、効果をパズルのように組み合わせます。</li>
             <li>強い対象や効果ほど、厳しい条件Powerが必要です。</li>
           </ul>
+        </div>
+        <div>
+          <h3>ローカルルール</h3>
+          ${
+            roomState?.localRules?.length
+              ? `<ul>${roomState.localRules
+                  .map((rule) => `<li>${escapeHtml(rule.label)}: ${escapeHtml(rule.description)}</li>`)
+                  .join('')}</ul>`
+              : '<p class="muted">現在ONのローカルルールはありません。</p>'
+          }
         </div>
       </div>
     </section>
@@ -900,6 +952,32 @@ function renderHostSettings() {
             ${[3, 4, 5].map((count) => option(String(count), `${count}ラウンド`, String(roomState.settings.roundCount || 4))).join('')}
           </select>
         </label>
+        <label>
+          縛りの競合
+          <select data-setting="bindingMode">
+            ${option('standard', '標準（同種は上書き）', roomState.settings.bindingMode || 'standard')}
+            ${option('chaos', 'カオス（同種もAND）', roomState.settings.bindingMode || 'standard')}
+          </select>
+        </label>
+      </div>
+      <div class="local-rule-settings">
+        <h3>ローカルルール</h3>
+        <div class="setting-check-grid">
+          ${(roomState.localRuleOptions || [])
+            .map((rule) => {
+              const checked = roomState.settings.localRules?.[rule.id] ? 'checked' : '';
+              return `
+                <label class="setting-check">
+                  <input data-setting="localRules.${escapeAttr(rule.id)}" type="checkbox" ${checked} />
+                  <span>
+                    <strong>${escapeHtml(rule.label)}</strong>
+                    <small>${escapeHtml(rule.description)}</small>
+                  </span>
+                </label>
+              `;
+            })
+            .join('')}
+        </div>
       </div>
       <button class="primary" data-click="start" type="button" ${roomState.players.length < 2 ? 'disabled' : ''}>
         ゲーム開始
@@ -970,7 +1048,32 @@ function renderPendingAction() {
             .join('')}
         </div>
         <button class="primary" data-click="confirm-gift-card" type="button" ${selectedCount === requiredCount ? '' : 'disabled'}>
-          このカードを渡す
+          選んだカードを渡す
+        </button>
+      </section>
+    `;
+  }
+
+  if (pending.type === 'discardCard') {
+    const hand = ownPlayer()?.hand || [];
+    const requiredCount = pending.requiredCount || 1;
+    const selectedCount = selectedDiscardCardIds.size;
+    return `
+      <section class="pending-panel">
+        <h2>捨てるカード</h2>
+        <p class="selection-counter">選択済み: ${selectedCount} / ${requiredCount}</p>
+        <div class="hand-grid compact">
+          ${hand
+            .map((card) => {
+              const selected = selectedDiscardCardIds.has(card.id) ? ' selected' : '';
+              return `<button class="card-button ${cardClass(card)}${selected}" data-click="select-discard-card" data-card-id="${escapeAttr(
+                card.id
+              )}" data-required-count="${requiredCount}" type="button">${escapeHtml(card.label)}</button>`;
+            })
+            .join('')}
+        </div>
+        <button class="primary" data-click="confirm-discard-card" type="button" ${selectedCount === requiredCount ? '' : 'disabled'}>
+          選んだカードを捨てる
         </button>
       </section>
     `;
@@ -1043,6 +1146,7 @@ function renderTurnConstraintNotice(availability) {
 }
 
 function renderRuleBuilder() {
+  ruleDraft.effectConfig = ruleDraft.effectConfig || { bindRank: '' };
   normalizeRuleDraftTarget();
   const power = calculateConditionPower(ruleDraft.condition);
   const target = getDraftTarget();
@@ -1091,7 +1195,7 @@ function renderRuleBuilder() {
                 value="plusOne"
                 ${ruleDraft.condition.rankRelation === 'plusOne' ? 'checked' : ''}
               />
-              <span>直前より+1</span>
+              <span>1つ上の数字</span>
             </label>
             <label class="relation-toggle">
               <input
@@ -1100,7 +1204,7 @@ function renderRuleBuilder() {
                 value="same"
                 ${ruleDraft.condition.suitRelation === 'same' ? 'checked' : ''}
               />
-              <span>直前と同じスート</span>
+              <span>同スート</span>
             </label>
           </div>
           ${renderConditionSockets(power, selectedConnector)}
@@ -1120,6 +1224,7 @@ function renderRuleBuilder() {
             <strong>${escapeHtml(EFFECT_CONFIGS[ruleDraft.effect]?.label || '')}</strong>
           </div>
           ${renderEffectChoices(power)}
+          ${renderEffectConfigControls()}
         </section>
       </div>
       <div class="rule-preview ${validation.ok ? '' : 'invalid'}">
@@ -1220,6 +1325,24 @@ function renderEffectChoices(power) {
   `;
 }
 
+function renderEffectConfigControls() {
+  if (ruleDraft.effect !== 'bindRank') {
+    return '';
+  }
+
+  return `
+    <div class="effect-config-control">
+      <label>
+        縛る数字
+        <select data-rule-field="bindRankValue">
+          <option value="">出した数字</option>
+          ${NORMAL_RANKS.map((rank) => option(rank, rank, ruleDraft.effectConfig.bindRank)).join('')}
+        </select>
+      </label>
+    </div>
+  `;
+}
+
 function renderTargetPeg(connectorId, connected) {
   return `
     <span class="mini-connector peg-stack" aria-hidden="true">
@@ -1231,21 +1354,23 @@ function renderTargetPeg(connectorId, connected) {
   `;
 }
 
-function previewTriggeredRuleIds() {
-  if (roomState?.settings?.mode !== 'normal' || selectedCardIds.size === 0) {
-    return new Set();
+function previewTriggeredRules() {
+  if (!['normal', 'chaos'].includes(roomState?.settings?.mode) || selectedCardIds.size === 0) {
+    return [];
   }
 
   const play = analyzeSelectedPlayPreview();
   if (!play) {
-    return new Set();
+    return [];
   }
 
-  return new Set(
-    roomState.rules
+  return [...(roomState.localRules || []), ...(roomState.rules || [])]
       .filter((rule) => !rule.hidden && rule.condition && conditionMatchesPreview(rule.condition, play))
-      .map((rule) => rule.id)
-  );
+      .map((rule) => ({
+        id: rule.id,
+        description: rule.localRuleId ? `${rule.label}: ${rule.description}` : rule.description,
+        local: Boolean(rule.localRuleId)
+      }));
 }
 
 function analyzeSelectedPlayPreview() {
@@ -1336,14 +1461,41 @@ function renderEffectSockets(effectId, selectedConnector) {
 }
 
 function renderRules() {
-  const highlightedRuleIds = previewTriggeredRuleIds();
+  const previewRules = previewTriggeredRules();
+  const highlightedRuleIds = new Set(previewRules.map((rule) => rule.id));
+  const localRules = roomState.localRules || [];
+  const customRules = roomState.rules || [];
   return `
     <section class="panel">
       <h2>特殊ルール</h2>
+      ${renderTriggerPreview(previewRules)}
+      <div class="rule-section">
+        <h3>ローカルルール</h3>
+        ${
+          localRules.length
+            ? `<div class="rule-list">
+                ${localRules
+                  .map(
+                    (rule) =>
+                      `<div class="rule-row local-rule-row ${
+                        highlightedRuleIds.has(rule.id) ? 'trigger-preview' : ''
+                      }">
+                        <span>${escapeHtml(rule.label)}</span>
+                        <small>${escapeHtml(rule.description)}</small>
+                        ${highlightedRuleIds.has(rule.id) ? '<small>発動候補</small>' : ''}
+                      </div>`
+                  )
+                  .join('')}
+              </div>`
+            : '<p class="muted">OFF</p>'
+        }
+      </div>
+      <div class="rule-section">
+        <h3>追加ルール</h3>
       ${
-        roomState.rules.length
+        customRules.length
           ? `<div class="rule-list">
-              ${roomState.rules
+              ${customRules
                 .map(
                   (rule) =>
                     `<div class="rule-row ${rule.hidden ? 'hidden-rule' : ''} ${
@@ -1358,7 +1510,28 @@ function renderRules() {
             </div>`
           : '<p class="muted">まだありません</p>'
       }
+      </div>
     </section>
+  `;
+}
+
+function renderTriggerPreview(previewRules) {
+  if (previewRules.length === 0) {
+    return '';
+  }
+
+  return `
+    <div class="trigger-preview-panel">
+      <h3>発動予定</h3>
+      <ul>
+        ${previewRules
+          .map(
+            (rule) =>
+              `<li>${rule.local ? '<strong>ローカル</strong> ' : ''}${escapeHtml(rule.description)}</li>`
+          )
+          .join('')}
+      </ul>
+    </div>
   `;
 }
 
@@ -1438,10 +1611,10 @@ function previewCondition() {
   }
 
   if (ruleDraft.condition.rankRelation === 'plusOne') {
-    phrases.push('直前より1大きい数字');
+    phrases.push('直前のプレイより1つ上の数字');
   }
   if (ruleDraft.condition.suitRelation === 'same') {
-    phrases.push('直前と同じスート');
+    phrases.push('直前のプレイと同じスート');
   }
 
   return phrases.length > 0 ? `${phrases.join('、かつ')}を満たしたら` : '条件を選んでください';
@@ -1459,10 +1632,8 @@ function previewEffect() {
     return `${targetLabel}にスート縛りをかける`;
   }
   if (ruleDraft.effect === 'bindRank') {
-    return `${targetLabel}に数字縛りをかける`;
-  }
-  if (ruleDraft.effect === 'bindStep') {
-    return `${targetLabel}に階段縛りをかける`;
+    const rank = ruleDraft.effectConfig.bindRank;
+    return `${targetLabel}に数字縛り${rank ? `（${rank}）` : ''}をかける`;
   }
   if (ruleDraft.effect === 'gift') {
     return `${targetLabel}へカードを1枚渡す`;
@@ -1645,7 +1816,8 @@ function effectOptionState(effectId, power) {
 
 function pendingLabel(pending) {
   if (pending.type === 'target') return '対象プレイヤーを選んでください';
-  if (pending.type === 'giftCard') return '渡すカードを1枚選んでください';
+  if (pending.type === 'giftCard') return `渡すカードを${pending.requiredCount || 1}枚選んでください`;
+  if (pending.type === 'discardCard') return `捨てるカードを${pending.requiredCount || 1}枚選んでください`;
   return '選択してください';
 }
 
@@ -1659,7 +1831,8 @@ function resetRuleDraft() {
   ruleDraft = {
     condition: { rank: '', suit: '', count: '', rankRelation: '', suitRelation: '' },
     target: 'next',
-    effect: 'skip'
+    effect: 'skip',
+    effectConfig: { bindRank: '' }
   };
   normalizeRuleDraftTarget();
 }
