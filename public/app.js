@@ -151,6 +151,9 @@ document.addEventListener('click', (event) => {
   if (action === 'restart-match') {
     emitAuthed('restartMatch', {});
   }
+  if (action === 'copy-room-code') {
+    copyRoomCode();
+  }
   if (action === 'set-rule-target') {
     if (button.dataset.disabled === 'true') {
       showMessage(button.dataset.reason || 'この対象は現在の条件では接続できません');
@@ -318,13 +321,42 @@ function clearMessage() {
   message = '';
 }
 
+async function copyRoomCode() {
+  const code = roomState?.code;
+  if (!code) return;
+
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(code);
+    } else {
+      copyTextFallback(code);
+    }
+    showMessage(`部屋コード ${code} をコピーしました`);
+  } catch (_error) {
+    copyTextFallback(code);
+    showMessage(`部屋コード ${code} をコピーしました`);
+  }
+}
+
+function copyTextFallback(text) {
+  const textarea = document.createElement('textarea');
+  textarea.value = text;
+  textarea.setAttribute('readonly', '');
+  textarea.style.position = 'fixed';
+  textarea.style.left = '-9999px';
+  document.body.appendChild(textarea);
+  textarea.select();
+  document.execCommand('copy');
+  textarea.remove();
+}
+
 function render() {
   app.innerHTML = `
     <main class="app-shell">
       <header class="top-bar">
         <div>
           <h1>ルール追加型大富豪</h1>
-          ${roomState ? `<p class="room-code">部屋 ${escapeHtml(roomState.code)}</p>` : ''}
+          ${roomState ? renderRoomCode() : ''}
         </div>
         <div class="top-actions">
           ${roomState ? '<button class="ghost danger" data-click="leave" type="button">退出</button>' : ''}
@@ -336,6 +368,15 @@ function render() {
       ${message ? `<div class="message">${escapeHtml(message)}</div>` : ''}
       ${roomState ? renderRoom() : renderEntrance()}
     </main>
+  `;
+}
+
+function renderRoomCode() {
+  return `
+    <div class="room-code-line">
+      <span class="room-code">部屋 ${escapeHtml(roomState.code)}</span>
+      <button class="copy-code-button" data-click="copy-room-code" type="button">コピー</button>
+    </div>
   `;
 }
 
@@ -470,7 +511,7 @@ function renderRuleBuildingPhase() {
       <strong>第${builder?.afterRound || ''}ラウンド後のルール追加フェーズ</strong>
       <span>${escapeHtml(builderName)}さんがルールを作成中です</span>
     </section>
-    <section class="content-grid">
+    <section class="content-grid rule-building-layout">
       <div class="main-column">
         ${
           builder?.isYourTurn
