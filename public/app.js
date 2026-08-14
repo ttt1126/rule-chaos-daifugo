@@ -72,6 +72,18 @@ const EFFECT_TARGETS = Object.fromEntries(
   Object.entries(EFFECT_CONFIGS).map(([id, config]) => [id, config.targets])
 );
 const USER_TARGET_IDS = ['self', 'next', 'any', 'all'];
+const RULE_PREDICTION_BY_MODE = {
+  normal: true,
+  chaos: true,
+  mystery: false
+};
+const RULE_ACTIVATION_NOTIFICATION_MS = {
+  single: 3500,
+  few: 4300,
+  many: 5200,
+  pendingAction: 6000,
+  maxItems: 6
+};
 
 let socket = null;
 let session = loadSession();
@@ -441,17 +453,26 @@ function collectRuleNotices(nextState) {
     return;
   }
 
-  ruleNotices = newRuleEvents.slice(-3);
+  ruleNotices = newRuleEvents.slice(-RULE_ACTIVATION_NOTIFICATION_MS.maxItems);
   window.clearTimeout(ruleNoticeTimer);
   ruleNoticeTimer = window.setTimeout(() => {
     ruleNotices = [];
     render();
-  }, 2200);
+  }, ruleNoticeDuration(ruleNotices.length, nextState));
 }
 
 function isRuleNoticeEvent(event) {
   const text = String(event.text || '');
   return event.type === 'rule' && (text.includes(':') || text.includes('隠しルールが発動'));
+}
+
+function ruleNoticeDuration(count, state) {
+  if (state?.game?.pendingAction) {
+    return RULE_ACTIVATION_NOTIFICATION_MS.pendingAction;
+  }
+  if (count >= 4) return RULE_ACTIVATION_NOTIFICATION_MS.many;
+  if (count >= 2) return RULE_ACTIVATION_NOTIFICATION_MS.few;
+  return RULE_ACTIVATION_NOTIFICATION_MS.single;
 }
 
 function showMessage(text) {
@@ -531,7 +552,7 @@ function renderRuleNotices() {
 
   return `
     <section class="rule-notice">
-      <strong>特殊ルール発動！</strong>
+      <strong>${ruleNotices.length > 1 ? `${ruleNotices.length}件のルール発動！` : '特殊ルール発動！'}</strong>
       <ul>
         ${ruleNotices.map((event) => `<li>${escapeHtml(event.text)}</li>`).join('')}
       </ul>
@@ -1108,6 +1129,7 @@ function renderHand() {
           })
           .join('')}
       </div>
+      ${renderHandRulePrediction()}
       <div class="action-bar">
         <button class="primary" data-click="play" type="button" ${
           disabled || availability.noLegalPlay || selectedCardIds.size === 0 ? 'disabled' : ''
@@ -1117,6 +1139,43 @@ function renderHand() {
         <button data-click="pass" type="button" ${disabled || !availability.canPass ? 'disabled' : ''}>パス</button>
       </div>
     </section>
+  `;
+}
+
+function renderHandRulePrediction() {
+  if (
+    roomState.status !== 'playing' ||
+    !roomState.game?.isYourTurn ||
+    roomState.game?.pendingAction ||
+    roomState.game?.paused
+  ) {
+    return '';
+  }
+
+  const prediction = previewTriggeredRules();
+  if (prediction.length === 0) {
+    return '';
+  }
+
+  return `
+    <div class="hand-rule-prediction" aria-live="polite">
+      <div class="prediction-heading">
+        <strong>このプレイで${prediction.length}ルール発動予定</strong>
+        <span>発動予定</span>
+      </div>
+      <ol class="prediction-list">
+        ${prediction
+          .map(
+            (rule) => `
+              <li>
+                <span>${escapeHtml(rule.prediction)}</span>
+                <small>${escapeHtml(rule.sourceText)}</small>
+              </li>
+            `
+          )
+          .join('')}
+      </ol>
+    </div>
   `;
 }
 
@@ -1355,7 +1414,7 @@ function renderTargetPeg(connectorId, connected) {
 }
 
 function previewTriggeredRules() {
-  if (!['normal', 'chaos'].includes(roomState?.settings?.mode) || selectedCardIds.size === 0) {
+  if (!showRulePredictionForMode(roomState?.settings?.mode) || selectedCardIds.size === 0) {
     return [];
   }
 
@@ -1369,8 +1428,14 @@ function previewTriggeredRules() {
       .map((rule) => ({
         id: rule.id,
         description: rule.localRuleId ? `${rule.label}: ${rule.description}` : rule.description,
+        sourceText: rule.localRuleId ? `${rule.label}: ${rule.description}` : rule.description,
+        prediction: describePredictedRule(rule, play),
         local: Boolean(rule.localRuleId)
       }));
+}
+
+function showRulePredictionForMode(mode) {
+  return Boolean(RULE_PREDICTION_BY_MODE[mode]);
 }
 
 function analyzeSelectedPlayPreview() {
@@ -1398,7 +1463,7 @@ function analyzeSelectedPlayPreview() {
   }
 
   const previousSuits = new Set((table?.cards || []).filter((card) => !card.joker && card.suit).map((card) => card.suit));
-  return {
+  const play = {
     count: cards.length,
     effectiveRank,
     hasJoker,
@@ -1407,6 +1472,21 @@ function analyzeSelectedPlayPreview() {
     previousRank: table?.rank || null,
     previousSuits
   };
+
+  return selectedPlaySatisfiesBindings(play) ? play : null;
+}
+
+function selectedPlaySatisfiesBindings(play) {
+  const bindings = ownPlayer()?.bindings || [];
+  return bindings.every((binding) => {
+    if (binding.type === 'suit') {
+      return (binding.suits || []).some((suit) => play.ruleSuits.has(suit));
+    }
+    if (binding.type === 'rank' || binding.type === 'step') {
+      return (binding.ranks || []).includes(play.effectiveRank);
+    }
+    return true;
+  });
 }
 
 function conditionMatchesPreview(condition, play) {
@@ -1445,6 +1525,45 @@ function rankValue(rank) {
   if (rank === 'JOKER') return NORMAL_RANKS.length + 3;
   const index = NORMAL_RANKS.indexOf(rank);
   return index < 0 ? -1 : index + 3;
+}
+
+function describePredictedRule(rule, play) {
+  const target = predictedTargetLabel(rule.target);
+  const count = Number(rule.count || 1);
+
+  if (rule.effect === 'skip') {
+    return `${target.object}をスキップ`;
+  }
+  if (rule.effect === 'gift') {
+    return `${target.to}へ${count}枚渡す`;
+  }
+  if (rule.effect === 'discard') {
+    return `自分の手札を追加で${count}枚捨てる`;
+  }
+  if (rule.effect === 'bindSuit') {
+    const suits = [...play.ruleSuits].map((suit) => SUITS.find(([id]) => id === suit)?.[1] || suit);
+    const suitText = suits.length ? suits.join(' / ') : '指定スート';
+    return `${target.subject}は次の行動で${suitText}を含む手しか出せない`;
+  }
+  if (rule.effect === 'bindRank') {
+    const rank = rule.effectConfig?.bindRank || (NORMAL_RANKS.includes(play.effectiveRank) ? play.effectiveRank : '指定数字');
+    return `${target.subject}は次の行動で${rank}しか出せない`;
+  }
+  if (rule.effect === 'reverse') {
+    return '進行方向が逆転する';
+  }
+  if (rule.effect === 'clear') {
+    return '場が流れる';
+  }
+  return rule.description || '特殊ルールが発動する';
+}
+
+function predictedTargetLabel(target) {
+  if (target === 'self') return { subject: '自分', object: '自分', to: '自分' };
+  if (target === 'next') return { subject: '次のプレイヤー', object: '次のプレイヤー', to: '次のプレイヤー' };
+  if (target === 'any') return { subject: '選んだプレイヤー', object: '選んだプレイヤー', to: '選んだプレイヤー' };
+  if (target === 'all') return { subject: '全員', object: '全員', to: '全員' };
+  return { subject: '場', object: '場', to: '場' };
 }
 
 function renderEffectSockets(effectId, selectedConnector) {

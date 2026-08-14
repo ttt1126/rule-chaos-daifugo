@@ -228,7 +228,9 @@ function createRoomManager() {
         description: rule.description,
         condition: rule.condition,
         target: rule.target,
-        effect: rule.effect
+        effect: rule.effect,
+        effectConfig: {},
+        count: rule.count || 1
       })),
       localRuleOptions: LOCAL_RULE_IDS.map((id) => ({
         id,
@@ -318,19 +320,23 @@ function publicBindings(player) {
       const suits = binding.suits || [];
       return {
         type: 'suit',
+        suits,
         label: `スート縛り: ${suits.map((suit) => SUIT_SYMBOLS[suit] || suit).join(' / ')}`
       };
     }
     if (binding.type === 'rank') {
+      const ranks = binding.ranks || [];
       return {
         type: 'rank',
-        label: `数字縛り: ${(binding.ranks || []).join(' / ')}`
+        ranks,
+        label: `数字縛り: ${ranks.join(' / ')}`
       };
     }
     if (binding.type === 'step') {
       const ranks = binding.ranks || [];
       return {
         type: 'step',
+        ranks,
         label: `数字縛り: ${ranks.length > 0 ? `${ranks.join(' / ')}のみ` : 'パスのみ'}`
       };
     }

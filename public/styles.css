@@ -171,6 +171,8 @@ h2 {
   gap: 4px;
   margin: 0;
   padding-left: 18px;
+  max-height: min(34vh, 260px);
+  overflow: auto;
 }
 
 .rules-help {
@@ -519,6 +521,68 @@ form,
   gap: 3px;
   margin: 0;
   padding-left: 18px;
+}
+
+.hand-rule-prediction {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+  border: 1px solid #e4c98d;
+  border-radius: 8px;
+  background: #fff8df;
+  box-shadow: inset 4px 0 0 var(--gold);
+  padding: 10px 12px;
+}
+
+.prediction-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.prediction-heading strong {
+  color: #6c4b00;
+  font-size: 0.94rem;
+}
+
+.prediction-heading span {
+  flex: 0 0 auto;
+  border-radius: 999px;
+  background: #f0dfad;
+  color: #5d4300;
+  padding: 2px 8px;
+  font-size: 0.72rem;
+  font-weight: 900;
+}
+
+.prediction-list {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding-left: 20px;
+  max-height: min(28vh, 190px);
+  overflow: auto;
+}
+
+.prediction-list li {
+  line-height: 1.35;
+}
+
+.prediction-list span,
+.prediction-list small {
+  display: block;
+}
+
+.prediction-list span {
+  color: var(--ink);
+  font-weight: 800;
+}
+
+.prediction-list small {
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: 0.74rem;
 }
 
 .card-face,
@@ -987,5 +1051,18 @@ form,
   .condition-sockets,
   .piece-choice-grid {
     grid-template-columns: 1fr;
+  }
+
+  .hand-rule-prediction {
+    padding: 9px 10px;
+  }
+
+  .prediction-heading {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .prediction-list {
+    max-height: 150px;
   }
 }
