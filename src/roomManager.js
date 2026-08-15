@@ -154,32 +154,39 @@ function createRoomManager() {
             ?.label || '標準',
         localRules: normalizeLocalRuleSettings(room.settings.localRules)
       },
-      players: room.players.map((player) => ({
-        id: player.id,
-        name: player.name,
-        isHost: player.id === room.hostId,
-        isYou: player.id === viewerId,
-        connected: player.connected,
-        left: Boolean(player.left),
-        disconnectedAt: player.disconnectedAt,
-        disconnectGraceMs: DISCONNECT_GRACE_MS,
-        cardCount: player.left ? 0 : player.hand.length,
-        hand:
-          !player.left && (player.id === viewerId || canSpectateHands)
-            ? sortHand(player.hand).map(publicCard)
-            : null,
-        finishedRank: player.finishedRank,
-        isRoundLeader: room.game?.roundLeaderId === player.id,
-        score: room.match?.scores?.[player.id] || 0,
-        roundRanks: room.match?.roundResults?.map((round) => {
-          const result = round.rankings.find((entry) => entry.playerId === player.id);
-          return result?.rank || null;
-        }) || [],
-        skipTurns: player.skipTurns,
-        bindings: publicBindings(player),
-        bindingSuit: player.bindingSuit,
-        bindingSuitLabel: player.bindingSuit ? SUIT_SYMBOLS[player.bindingSuit] : null
-      })),
+      players: room.players.map((player) => {
+        const turnAvailability = room.game?.currentPlayerId === player.id
+          ? getTurnAvailability(room, player.id)
+          : null;
+        return {
+          id: player.id,
+          name: player.name,
+          isHost: player.id === room.hostId,
+          isYou: player.id === viewerId,
+          connected: player.connected,
+          left: Boolean(player.left),
+          disconnectedAt: player.disconnectedAt,
+          disconnectGraceMs: DISCONNECT_GRACE_MS,
+          cardCount: player.left ? 0 : player.hand.length,
+          hand:
+            !player.left && (player.id === viewerId || canSpectateHands)
+              ? sortHand(player.hand).map(publicCard)
+              : null,
+          finishedRank: player.finishedRank,
+          isRoundLeader: room.game?.roundLeaderId === player.id,
+          score: room.match?.scores?.[player.id] || 0,
+          roundRanks: room.match?.roundResults?.map((round) => {
+            const result = round.rankings.find((entry) => entry.playerId === player.id);
+            return result?.rank || null;
+          }) || [],
+          skipTurns: player.skipTurns,
+          bindings: publicBindings(player),
+          bindingSuit: player.bindingSuit,
+          bindingSuitLabel: player.bindingSuit ? SUIT_SYMBOLS[player.bindingSuit] : null,
+          actionBlocked: Boolean(turnAvailability?.noLegalPlay),
+          actionStatusText: turnAvailability?.noLegalPlay ? turnAvailability.passReason || '出せるカードがありません' : ''
+        };
+      }),
       game: room.game
         ? {
             direction: room.game.direction,
@@ -213,6 +220,11 @@ function createRoomManager() {
         hidden: rule.secret && !rule.revealed,
         revealed: rule.revealed,
         generated: rule.generated,
+        createdBy: rule.createdBy,
+        createdByName: rule.createdByName || room.players.find((player) => player.id === rule.createdBy)?.name || null,
+        createdRound: rule.createdRound || null,
+        createdPhase: rule.createdPhase || null,
+        createdAfterRound: rule.createdAfterRound || null,
         condition: rule.secret && !rule.revealed ? null : rule.condition,
         conditionPower: rule.secret && !rule.revealed ? null : calculateConditionPower(rule.condition),
         target: rule.secret && !rule.revealed ? null : rule.target,
@@ -237,7 +249,8 @@ function createRoomManager() {
         label: LOCAL_RULES[id].label,
         description: LOCAL_RULES[id].description
       })),
-      recentEvents: [...room.events].slice(-12).reverse(),
+      recentEvents: [...room.events].slice(-5).reverse().map(publicEvent),
+      eventHistory: [...room.events].map(publicEvent),
       targetOptions: Object.fromEntries(
         Object.entries(validTargetsByEffect()).map(([effect, targets]) => [effect, targets])
       )
@@ -306,6 +319,19 @@ function validTargetsByEffect() {
       validTargetsForEffect(effect)
     ])
   );
+}
+
+function publicEvent(event) {
+  return {
+    id: event.id,
+    text: event.text,
+    type: event.type || 'info',
+    at: event.at,
+    round: event.round ?? null,
+    phase: event.phase || null,
+    playerId: event.playerId || null,
+    metadata: event.metadata || {}
+  };
 }
 
 function publicBindings(player) {

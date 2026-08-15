@@ -77,6 +77,16 @@ const RULE_PREDICTION_BY_MODE = {
   chaos: true,
   mystery: false
 };
+const PLAY_REASON_BY_MODE = {
+  normal: true,
+  chaos: true,
+  mystery: true
+};
+const PLAYER_STATE_DISPLAY_BY_MODE = {
+  normal: 'full',
+  chaos: 'full',
+  mystery: 'full'
+};
 const RULE_ACTIVATION_NOTIFICATION_MS = {
   single: 3500,
   few: 4300,
@@ -95,6 +105,8 @@ let seenEventIds = new Set();
 let ruleNotices = [];
 let ruleNoticeTimer = null;
 let showRulesHelp = false;
+let showEventHistory = false;
+let eventHistoryFilter = 'all';
 let message = '';
 let ruleDraft = {
   condition: { rank: '', suit: '', count: '', rankRelation: '', suitRelation: '' },
@@ -178,6 +190,18 @@ document.addEventListener('click', (event) => {
   }
   if (action === 'close-rules-help') {
     showRulesHelp = false;
+    render();
+  }
+  if (action === 'open-event-history') {
+    showEventHistory = true;
+    render();
+  }
+  if (action === 'close-event-history') {
+    showEventHistory = false;
+    render();
+  }
+  if (action === 'set-event-filter') {
+    eventHistoryFilter = button.dataset.filter || 'all';
     render();
   }
   if (action === 'end-game') {
@@ -372,6 +396,8 @@ function leaveLocalRoom(text) {
   selectedDiscardCardIds.clear();
   ruleNotices = [];
   seenEventIds.clear();
+  showEventHistory = false;
+  eventHistoryFilter = 'all';
   localStorage.removeItem(STORAGE_KEY);
   message = text;
   render();
@@ -534,6 +560,7 @@ function render() {
       ${renderRuleNotices()}
       ${showRulesHelp ? renderRulesHelp() : ''}
       ${roomState ? renderRoom() : renderEntrance()}
+      ${showEventHistory ? renderEventHistoryModal() : ''}
     </main>
   `;
 }
@@ -921,9 +948,8 @@ function renderPlayers() {
                     <span>${player.left ? '退出' : player.connected ? '接続中' : '切断中'}</span>
                     ${roomState.match ? `<span>${player.score || 0}pt</span>` : ''}
                     ${player.finishedRank ? `<span>${player.finishedRank}位</span>` : ''}
-                    ${player.skipTurns ? `<span>スキップ ${player.skipTurns}</span>` : ''}
-                    ${(player.bindings || []).map((binding) => `<span>${escapeHtml(binding.label)}</span>`).join('')}
                   </div>
+                  ${renderPlayerStateBadges(player)}
                   ${renderSpectatorHand(player)}
                 </div>
                 <span class="card-count">${player.cardCount}枚</span>
@@ -933,6 +959,42 @@ function renderPlayers() {
           .join('')}
       </div>
     </section>
+  `;
+}
+
+function renderPlayerStateBadges(player) {
+  if (PLAYER_STATE_DISPLAY_BY_MODE[roomState.settings?.mode] === 'hidden') {
+    return '';
+  }
+
+  const badges = [];
+  if (player.actionBlocked) {
+    badges.push({ label: '行動不能', detail: player.actionStatusText || '出せるカードがありません', className: 'blocked' });
+  }
+  if (player.skipTurns) {
+    badges.push({ label: `スキップ ${player.skipTurns}`, detail: '次の行動機会を飛ばします', className: 'skip' });
+  }
+  for (const binding of player.bindings || []) {
+    badges.push({ label: binding.label, detail: '次の実際の行動後に解除', className: 'binding' });
+  }
+
+  if (badges.length === 0) {
+    return '';
+  }
+
+  return `
+    <div class="state-badges" aria-label="${escapeAttr(player.name)}さんの現在の状態">
+      ${badges
+        .map(
+          (badge) => `
+            <span class="state-badge ${escapeAttr(badge.className)}" title="${escapeAttr(badge.detail)}">
+              <strong>${escapeHtml(badge.label)}</strong>
+              <small>${escapeHtml(badge.detail)}</small>
+            </span>
+          `
+        )
+        .join('')}
+    </div>
   `;
 }
 
@@ -1111,6 +1173,8 @@ function renderHand() {
   const disabled =
     player?.left || !game?.isYourTurn || game?.paused || Boolean(game?.pendingAction) || roomState.status !== 'playing';
   const cardsDisabled = disabled || Boolean(game?.isYourTurn && availability.noLegalPlay);
+  const selectedValidation = validateSelectedPlayPreview();
+  const selectedPlayBlocked = selectedCardIds.size > 0 && !selectedValidation.legal;
 
   return `
     <section class="hand-area ${game?.isYourTurn && !game?.pendingAction ? 'your-turn-hand' : ''}">
@@ -1130,9 +1194,10 @@ function renderHand() {
           .join('')}
       </div>
       ${renderHandRulePrediction()}
+      ${renderSelectedPlayReasons(selectedValidation)}
       <div class="action-bar">
         <button class="primary" data-click="play" type="button" ${
-          disabled || availability.noLegalPlay || selectedCardIds.size === 0 ? 'disabled' : ''
+          disabled || availability.noLegalPlay || selectedCardIds.size === 0 || selectedPlayBlocked ? 'disabled' : ''
         }>
           出す
         </button>
@@ -1140,6 +1205,32 @@ function renderHand() {
       </div>
     </section>
   `;
+}
+
+function renderSelectedPlayReasons(validation) {
+  if (
+    !showPlayReasonsForMode(roomState?.settings?.mode) ||
+    selectedCardIds.size === 0 ||
+    validation.legal ||
+    !roomState.game?.isYourTurn ||
+    roomState.game?.pendingAction ||
+    roomState.game?.paused
+  ) {
+    return '';
+  }
+
+  return `
+    <div class="selected-play-reasons" aria-live="polite">
+      <strong>この組み合わせは出せません</strong>
+      <ul>
+        ${validation.reasons.map((reason) => `<li>${escapeHtml(reason)}</li>`).join('')}
+      </ul>
+    </div>
+  `;
+}
+
+function showPlayReasonsForMode(mode) {
+  return Boolean(PLAY_REASON_BY_MODE[mode]);
 }
 
 function renderHandRulePrediction() {
@@ -1219,7 +1310,7 @@ function renderRuleBuilder() {
       <div class="puzzle-builder">
         <section class="puzzle-piece condition-piece">
           <div class="piece-heading">
-            <span>条件</span>
+            <span><span class="piece-icon">#</span> 条件</span>
             <strong>Power ${power}</strong>
           </div>
           <div class="form-grid compact-form">
@@ -1271,15 +1362,15 @@ function renderRuleBuilder() {
         <div class="puzzle-arrow" aria-hidden="true">→</div>
         <section class="puzzle-piece target-piece">
           <div class="piece-heading">
-            <span>対象</span>
-            <strong>${escapeHtml(connectorLabel(selectedConnector))}</strong>
+            <span><span class="piece-icon">→</span> 対象</span>
+            <strong>${escapeHtml(connectorFullLabel(selectedConnector))}</strong>
           </div>
           ${renderTargetChoices(power)}
         </section>
         <div class="puzzle-arrow" aria-hidden="true">→</div>
         <section class="puzzle-piece effect-piece">
           <div class="piece-heading">
-            <span>効果</span>
+            <span><span class="piece-icon">${escapeHtml(effectIcon(ruleDraft.effect))}</span> 効果</span>
             <strong>${escapeHtml(EFFECT_CONFIGS[ruleDraft.effect]?.label || '')}</strong>
           </div>
           ${renderEffectChoices(power)}
@@ -1305,7 +1396,10 @@ function renderConditionSockets(power, selectedConnector) {
           <div class="connector-line ${open ? 'open' : 'locked'} ${active ? 'active' : ''}">
             <span class="connector-level">${connector.level}</span>
             <span class="socket-dot">${open ? '○' : '×'}</span>
-            <span>${escapeHtml(connector.shortLabel)}</span>
+            <span>
+              <strong>${escapeHtml(connector.shortLabel)}</strong>
+              <small>${escapeHtml(connector.label)}</small>
+            </span>
           </div>
         `;
       }).join('')}
@@ -1322,8 +1416,8 @@ function renderTargetChoices(power) {
       <div class="piece-choice selected ${state.ok ? 'connected' : 'is-disabled'}">
         ${renderTargetPeg(TARGETS[targetId].connector, state.ok)}
         <span>
-          <strong>${escapeHtml(effectConfig.fixedTargetLabel)}</strong>
-          <small>${escapeHtml(state.ok ? 'GLOBALに接続中' : state.shortReason)}</small>
+          <strong><span class="choice-icon">${escapeHtml(targetIcon(targetId))}</span>${escapeHtml(effectConfig.fixedTargetLabel)}</strong>
+          <small>${escapeHtml(state.ok ? `${connectorFullLabel(TARGETS[targetId].connector)}に接続中` : state.shortReason)}</small>
         </span>
       </div>
     `;
@@ -1346,8 +1440,8 @@ function renderTargetChoices(power) {
           >
             ${renderTargetPeg(TARGETS[targetId].connector, state.ok)}
             <span>
-              <strong>${escapeHtml(TARGETS[targetId].label)}</strong>
-              <small>${escapeHtml(state.ok ? `${connectorLabel(TARGETS[targetId].connector)}に接続` : state.shortReason)}</small>
+              <strong><span class="choice-icon">${escapeHtml(targetIcon(targetId))}</span>${escapeHtml(TARGETS[targetId].label)}</strong>
+              <small>${escapeHtml(state.ok ? `${connectorFullLabel(TARGETS[targetId].connector)}に接続` : state.shortReason)}</small>
             </span>
           </button>
         `;
@@ -1374,7 +1468,7 @@ function renderEffectChoices(power) {
           >
             ${renderEffectSockets(effectId, state.connector)}
             <span>
-              <strong>${escapeHtml(label)}</strong>
+              <strong><span class="choice-icon">${escapeHtml(effectIcon(effectId))}</span>${escapeHtml(label)}</strong>
               <small>${escapeHtml(state.ok ? connectorSummary(effectId) : state.shortReason)}</small>
             </span>
           </button>
@@ -1439,26 +1533,42 @@ function showRulePredictionForMode(mode) {
 }
 
 function analyzeSelectedPlayPreview() {
+  const validation = validateSelectedPlayPreview();
+  return validation.legal ? validation.play : null;
+}
+
+function validateSelectedPlayPreview() {
   const hand = ownPlayer()?.hand || [];
   const byId = new Map(hand.map((card) => [card.id, card]));
   const cards = [...selectedCardIds].map((id) => byId.get(id)).filter(Boolean);
-  if (cards.length !== selectedCardIds.size || cards.length < 1 || cards.length > 4) {
-    return null;
+  const reasons = [];
+
+  if (cards.length !== selectedCardIds.size) {
+    reasons.push('手札にないカードが選ばれています');
+  }
+  if (cards.length < 1) {
+    return { legal: false, reasons: ['カードを選んでください'], play: null };
+  }
+  if (cards.length > 4) {
+    reasons.push('同時に出せるのは4枚までです');
   }
 
   const nonJokers = cards.filter((card) => !card.joker);
   const hasJoker = nonJokers.length !== cards.length;
   const printedRanks = [...new Set(nonJokers.map((card) => card.rank))];
   if (printedRanks.length > 1) {
-    return null;
+    reasons.push('複数枚出しは同じ数字だけ出せます');
   }
 
   const jokerOnly = nonJokers.length === 0;
   const effectiveRank = jokerOnly ? 'JOKER' : printedRanks[0];
   const table = roomState.game?.table;
   if (table) {
-    if (cards.length !== table.count || rankValue(effectiveRank) <= rankValue(table.rank)) {
-      return null;
+    if (cards.length !== table.count) {
+      reasons.push(`場が${table.count}枚なので、同じ${table.count}枚で出してください`);
+    }
+    if (rankValue(effectiveRank) <= rankValue(table.rank)) {
+      reasons.push(`場の${table.rank}より強い数字を出してください`);
     }
   }
 
@@ -1473,20 +1583,40 @@ function analyzeSelectedPlayPreview() {
     previousSuits
   };
 
-  return selectedPlaySatisfiesBindings(play) ? play : null;
+  const bindingReasons = selectedPlayBindingReasons(play);
+  reasons.push(...bindingReasons);
+
+  return {
+    legal: reasons.length === 0,
+    reasons,
+    play: reasons.length === 0 ? play : null
+  };
 }
 
 function selectedPlaySatisfiesBindings(play) {
+  return selectedPlayBindingReasons(play).length === 0;
+}
+
+function selectedPlayBindingReasons(play) {
   const bindings = ownPlayer()?.bindings || [];
-  return bindings.every((binding) => {
+  const reasons = [];
+  for (const binding of bindings) {
     if (binding.type === 'suit') {
-      return (binding.suits || []).some((suit) => play.ruleSuits.has(suit));
+      const ok = (binding.suits || []).some((suit) => play.ruleSuits.has(suit));
+      if (!ok) {
+        reasons.push(`${binding.label || 'スート縛り'}を満たしていません`);
+      }
+      continue;
     }
     if (binding.type === 'rank' || binding.type === 'step') {
-      return (binding.ranks || []).includes(play.effectiveRank);
+      const ok = (binding.ranks || []).includes(play.effectiveRank);
+      if (!ok) {
+        reasons.push(`${binding.label || '数字縛り'}を満たしていません`);
+      }
+      continue;
     }
-    return true;
-  });
+  }
+  return reasons;
 }
 
 function conditionMatchesPreview(condition, play) {
@@ -1622,6 +1752,7 @@ function renderRules() {
                     }">
                       <span>${escapeHtml(rule.description)}</span>
                       ${rule.generated ? '<small>ランダム</small>' : ''}
+                      ${renderRuleCreatorMeta(rule)}
                       ${highlightedRuleIds.has(rule.id) ? '<small>発動候補</small>' : ''}
                     </div>`
                 )
@@ -1632,6 +1763,22 @@ function renderRules() {
       </div>
     </section>
   `;
+}
+
+function renderRuleCreatorMeta(rule) {
+  if (rule.generated) {
+    return '';
+  }
+  const parts = [];
+  if (rule.createdByName) {
+    parts.push(`${rule.createdByName}さん`);
+  }
+  if (rule.createdAfterRound) {
+    parts.push(`第${rule.createdAfterRound}R後`);
+  } else if (rule.createdRound) {
+    parts.push(`第${rule.createdRound}R`);
+  }
+  return parts.length ? `<small>${escapeHtml(parts.join(' / '))}</small>` : '';
 }
 
 function renderTriggerPreview(previewRules) {
@@ -1655,18 +1802,155 @@ function renderTriggerPreview(previewRules) {
 }
 
 function renderEvents() {
+  const recentEvents = roomState.recentEvents || [];
+  const historyCount = roomState.eventHistory?.length || recentEvents.length;
   return `
     <section class="panel">
-      <h2>直近の出来事</h2>
+      <div class="panel-heading-row">
+        <h2>直近の出来事</h2>
+        <button class="ghost compact-button" data-click="open-event-history" type="button">履歴を見る</button>
+      </div>
       ${
-        roomState.recentEvents.length
+        recentEvents.length
           ? `<ol class="event-list">
-              ${roomState.recentEvents.map((event) => `<li>${escapeHtml(event.text)}</li>`).join('')}
+              ${recentEvents.map((event) => `<li>${renderEventTypeBadge(event.type)}${escapeHtml(event.text)}</li>`).join('')}
             </ol>`
           : '<p class="muted">まだありません</p>'
       }
+      <p class="history-count">${historyCount}件保存中</p>
     </section>
   `;
+}
+
+function renderEventHistoryModal() {
+  const allEvents = roomState?.eventHistory || [];
+  const events = filterEventsForHistory(allEvents);
+  const grouped = groupEventsBySection(events);
+  const filters = [
+    ['all', 'すべて'],
+    ['settings', '設定'],
+    ['rule', 'ルール'],
+    ['play', 'プレイ'],
+    ['system', 'システム']
+  ];
+
+  return `
+    <div class="history-backdrop" role="presentation">
+      <section class="history-sheet" role="dialog" aria-modal="true" aria-label="ログ履歴">
+        <div class="history-header">
+          <div>
+            <h2>ログ履歴</h2>
+            <p>${allEvents.length}件のサーバーログ</p>
+          </div>
+          <button class="ghost compact-button" data-click="close-event-history" type="button">閉じる</button>
+        </div>
+        <div class="history-filter-row" aria-label="ログフィルター">
+          ${filters
+            .map(
+              ([id, label]) => `
+                <button
+                  class="${eventHistoryFilter === id ? 'selected' : ''}"
+                  data-click="set-event-filter"
+                  data-filter="${escapeAttr(id)}"
+                  type="button"
+                >${escapeHtml(label)}</button>
+              `
+            )
+            .join('')}
+        </div>
+        ${
+          grouped.length > 1
+            ? `<div class="history-jumps">
+                ${grouped
+                  .map(
+                    (group, index) =>
+                      `<a href="#history-section-${index}">${escapeHtml(group.label)}</a>`
+                  )
+                  .join('')}
+              </div>`
+            : ''
+        }
+        <div class="history-body">
+          ${
+            grouped.length
+              ? grouped
+                  .map(
+                    (group, index) => `
+                      <section class="history-section" id="history-section-${index}">
+                        <h3>${escapeHtml(group.label)}</h3>
+                        <ol>
+                          ${group.events
+                            .map(
+                              (event) => `
+                                <li class="history-event">
+                                  <span class="history-time">${escapeHtml(formatEventTime(event.at))}</span>
+                                  ${renderEventTypeBadge(event.type)}
+                                  <span>${escapeHtml(event.text)}</span>
+                                </li>
+                              `
+                            )
+                            .join('')}
+                        </ol>
+                      </section>
+                    `
+                  )
+                  .join('')
+              : '<p class="muted">この条件のログはありません</p>'
+          }
+        </div>
+      </section>
+    </div>
+  `;
+}
+
+function filterEventsForHistory(events) {
+  if (eventHistoryFilter === 'all') return events;
+  if (eventHistoryFilter === 'system') {
+    return events.filter((event) => ['system', 'finish', 'pass'].includes(event.type));
+  }
+  return events.filter((event) => event.type === eventHistoryFilter);
+}
+
+function groupEventsBySection(events) {
+  const groups = [];
+  for (const event of events) {
+    const label = eventSectionLabel(event);
+    let group = groups[groups.length - 1];
+    if (!group || group.label !== label) {
+      group = { label, events: [] };
+      groups.push(group);
+    }
+    group.events.push(event);
+  }
+  return groups;
+}
+
+function eventSectionLabel(event) {
+  if (event.phase === 'lobby') return 'ロビー';
+  if (event.phase === 'roundResult') return `第${event.round || ''}ラウンド結果`;
+  if (event.phase === 'ruleBuilding') return `第${event.round || ''}ラウンド後 ルール追加`;
+  if (event.phase === 'matchResult' || event.phase === 'finished') return '最終結果';
+  if (event.round) return `第${event.round}ラウンド`;
+  return 'システム';
+}
+
+function renderEventTypeBadge(type) {
+  const labels = {
+    settings: '設定',
+    rule: 'ルール',
+    play: 'プレイ',
+    pass: 'パス',
+    finish: '順位',
+    system: '進行',
+    info: '情報'
+  };
+  return `<span class="event-type ${escapeAttr(type || 'info')}">${escapeHtml(labels[type] || labels.info)}</span>`;
+}
+
+function formatEventTime(at) {
+  if (!at) return '';
+  const date = new Date(at);
+  return date.toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 }
 
 function renderCard(card) {
@@ -1709,6 +1993,9 @@ function normalizeRuleDraftTarget(preferUsable = false) {
 function previewRule() {
   const conditionText = previewCondition();
   const effectText = previewEffect();
+  if (!hasDraftCondition()) {
+    return `条件を選ぶと、${effectText}`;
+  }
   return `${conditionText}、${effectText}`;
 }
 
@@ -1736,7 +2023,7 @@ function previewCondition() {
     phrases.push('直前のプレイと同じスート');
   }
 
-  return phrases.length > 0 ? `${phrases.join('、かつ')}を満たしたら` : '条件を選んでください';
+  return phrases.length > 0 ? `${phrases.join('、かつ')}なら` : '条件を選択中';
 }
 
 function previewEffect() {
@@ -1748,11 +2035,11 @@ function previewEffect() {
     return `${targetLabel}を1回スキップする`;
   }
   if (ruleDraft.effect === 'bindSuit') {
-    return `${targetLabel}にスート縛りをかける`;
+    return `${targetLabel}は次の行動で出したスートを含む手しか出せない`;
   }
   if (ruleDraft.effect === 'bindRank') {
     const rank = ruleDraft.effectConfig.bindRank;
-    return `${targetLabel}に数字縛り${rank ? `（${rank}）` : ''}をかける`;
+    return `${targetLabel}は次の行動で${rank || '出した数字'}しか出せない`;
   }
   if (ruleDraft.effect === 'gift') {
     return `${targetLabel}へカードを1枚渡す`;
@@ -1764,6 +2051,16 @@ function previewEffect() {
     return '場を流す';
   }
   return effectConfig.label;
+}
+
+function hasDraftCondition() {
+  return Boolean(
+    ruleDraft.condition.rank ||
+      ruleDraft.condition.suit ||
+      ruleDraft.condition.count ||
+      ruleDraft.condition.rankRelation ||
+      ruleDraft.condition.suitRelation
+  );
 }
 
 function validateRuleDraft() {
@@ -1844,9 +2141,35 @@ function connectorLabel(connectorId) {
   return connector ? `${connector.level} ${connector.shortLabel}` : connectorId;
 }
 
+function connectorFullLabel(connectorId) {
+  const connector = CONNECTORS.find((candidate) => candidate.id === connectorId);
+  return connector ? `${connector.level} ${connector.shortLabel}（${connector.label}）` : connectorId;
+}
+
 function connectorSummary(effectId) {
   const effectConfig = EFFECT_CONFIGS[effectId];
-  return effectConfig.connectors.map(connectorLabel).join(' / ');
+  return effectConfig.connectors.map(connectorFullLabel).join(' / ');
+}
+
+function targetIcon(targetId) {
+  return {
+    self: '自',
+    next: '次',
+    any: '選',
+    all: '全',
+    none: '場'
+  }[targetId] || '→';
+}
+
+function effectIcon(effectId) {
+  return {
+    skip: '⏭',
+    bindSuit: '♠',
+    bindRank: '#',
+    reverse: '↺',
+    clear: '流',
+    gift: '渡'
+  }[effectId] || '効';
 }
 
 function targetOptionState(targetId, power, displayLabel) {

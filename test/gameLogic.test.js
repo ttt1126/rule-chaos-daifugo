@@ -1018,6 +1018,73 @@ test('ホストのゲーム終了は部屋とプレイヤーを維持してロ�
   assert.equal(room.events.length, 1);
 });
 
+test('設定変更ログは差分を構造化して残す', () => {
+  const manager = createRoomManager();
+  const { room, player } = manager.createRoom('A');
+
+  manager.updateSettings(room, player.id, {
+    mode: 'chaos',
+    hiddenRuleCount: 8,
+    roundCount: 5,
+    bindingMode: 'chaos',
+    localRules: { eightCut: true, fiveSkip: false, sevenGift: false, tenDiscard: false }
+  });
+
+  const event = room.events.at(-1);
+  assert.equal(event.type, 'settings');
+  assert.equal(event.playerId, player.id);
+  assert.ok(event.text.includes('モード 通常 → カオス'));
+  assert.ok(event.metadata.changes.some((change) => change.key === 'localRules.eightCut'));
+});
+
+test('開始時設定とサーバー履歴を公開状態で復元できる', () => {
+  const manager = createRoomManager();
+  const { room, player: p1 } = manager.createRoom('A');
+  manager.joinRoom(room.code, 'B');
+  room.settings.localRules.eightCut = true;
+
+  manager.startGame(room, p1.id);
+
+  const state = manager.getPublicState(room, p1.id);
+  assert.ok(state.eventHistory.length >= state.recentEvents.length);
+  assert.ok(state.eventHistory.some((event) => event.type === 'settings' && event.metadata.snapshot));
+});
+
+test('公開状態は現在プレイヤーの行動不能を状態として返す', () => {
+  const manager = createRoomManager();
+  const { room, player: p1 } = manager.createRoom('A');
+  const { player: p2 } = manager.joinRoom(room.code, 'B');
+  room.status = 'playing';
+  room.game = {
+    direction: 1,
+    currentPlayerId: p1.id,
+    roundLeaderId: p1.id,
+    table: null,
+    lastPlayBy: null,
+    passes: [],
+    rankings: [],
+    roundPlayerIds: [p1.id, p2.id],
+    phase: 'playing',
+    pendingAction: null,
+    effectQueue: [],
+    resolvingActorId: null,
+    forceLeadPlayerId: null,
+    emptyTablePasses: [],
+    emptyTableFirstPasserId: null,
+    autoPassDepth: 0,
+    turnNumber: 1
+  };
+  p1.hand = [card('a', '7', 'H')];
+  p2.hand = [card('b', '8', 'H')];
+  p1.bindings = [{ type: 'suit', suits: ['S'] }];
+
+  const state = manager.getPublicState(room, p2.id);
+  const current = state.players.find((player) => player.id === p1.id);
+
+  assert.equal(current.actionBlocked, true);
+  assert.ok(current.actionStatusText.includes('出せるカード'));
+});
+
 test('上がったプレイヤーだけ他人の手札を観戦できる', () => {
   const manager = createRoomManager();
   const { room, player: p1 } = manager.createRoom('A');

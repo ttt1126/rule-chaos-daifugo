@@ -2,6 +2,7 @@ const {
   BINDING_MODES,
   DEFAULT_BINDING_MODE_BY_MODE,
   EFFECTS,
+  LOCAL_RULE_IDS,
   MATCH_DEFAULTS,
   MODES,
   RANKS,
@@ -18,7 +19,7 @@ const {
   shuffle,
   sortHand
 } = require('./cardUtils');
-const { enabledLocalRules, normalizeLocalRuleSettings } = require('./localRules');
+const { LOCAL_RULES, enabledLocalRules, normalizeLocalRuleSettings } = require('./localRules');
 const { generateRandomRules } = require('./randomRules');
 const {
   describeCondition,
@@ -30,17 +31,22 @@ const {
   ruleSignature
 } = require('./ruleEngine');
 
-const MAX_RECENT_EVENTS = 30;
+const MAX_EVENT_HISTORY = 240;
 
-function addEvent(room, text, type = 'info') {
+function addEvent(room, text, type = 'info', options = {}) {
+  const metadata = options.metadata || {};
   room.events.push({
     id: makeId('event'),
     text,
     type,
-    at: Date.now()
+    at: Date.now(),
+    round: options.round ?? room.match?.currentRound ?? null,
+    phase: options.phase || room.status || room.game?.phase || 'lobby',
+    playerId: options.playerId || metadata.playerId || null,
+    metadata
   });
-  if (room.events.length > MAX_RECENT_EVENTS) {
-    room.events.splice(0, room.events.length - MAX_RECENT_EVENTS);
+  if (room.events.length > MAX_EVENT_HISTORY) {
+    room.events.splice(0, room.events.length - MAX_EVENT_HISTORY);
   }
 }
 
@@ -132,6 +138,80 @@ function normalizeRoundCount(count) {
   return ROUND_COUNTS.includes(numeric) ? numeric : MATCH_DEFAULTS.roundCount;
 }
 
+function settingsSnapshot(settings) {
+  const mode = normalizeMode(settings.mode);
+  const bindingMode = normalizeBindingMode(settings.bindingMode || DEFAULT_BINDING_MODE_BY_MODE[mode]);
+  return {
+    mode,
+    hiddenRuleCount: normalizeHiddenRuleCount(settings.hiddenRuleCount),
+    roundCount: normalizeRoundCount(settings.roundCount),
+    bindingMode,
+    localRules: normalizeLocalRuleSettings(settings.localRules)
+  };
+}
+
+function settingLabel(key) {
+  if (key === 'mode') return 'モード';
+  if (key === 'hiddenRuleCount') return 'ランダムルール数';
+  if (key === 'roundCount') return 'ラウンド数';
+  if (key === 'bindingMode') return '縛りの競合';
+  if (key.startsWith('localRules.')) {
+    const ruleId = key.split('.')[1];
+    return `ローカルルール: ${LOCAL_RULES[ruleId]?.label || ruleId}`;
+  }
+  return key;
+}
+
+function settingValueLabel(key, value) {
+  if (key === 'mode') return MODES[value]?.label || value;
+  if (key === 'hiddenRuleCount') return `${value}個`;
+  if (key === 'roundCount') return `${value}ラウンド`;
+  if (key === 'bindingMode') return BINDING_MODES[value]?.label || value;
+  if (key.startsWith('localRules.')) return value ? 'ON' : 'OFF';
+  return String(value);
+}
+
+function flattenSettings(snapshot) {
+  const flat = {
+    mode: snapshot.mode,
+    hiddenRuleCount: snapshot.hiddenRuleCount,
+    roundCount: snapshot.roundCount,
+    bindingMode: snapshot.bindingMode
+  };
+  for (const id of LOCAL_RULE_IDS) {
+    flat[`localRules.${id}`] = Boolean(snapshot.localRules[id]);
+  }
+  return flat;
+}
+
+function settingsDiff(before, after) {
+  const beforeFlat = flattenSettings(before);
+  const afterFlat = flattenSettings(after);
+  return Object.keys(afterFlat)
+    .filter((key) => beforeFlat[key] !== afterFlat[key])
+    .map((key) => ({
+      key,
+      label: settingLabel(key),
+      oldValue: beforeFlat[key],
+      newValue: afterFlat[key],
+      oldLabel: settingValueLabel(key, beforeFlat[key]),
+      newLabel: settingValueLabel(key, afterFlat[key])
+    }));
+}
+
+function settingsSnapshotLabel(snapshot) {
+  const enabledRules = LOCAL_RULE_IDS
+    .filter((id) => snapshot.localRules[id])
+    .map((id) => LOCAL_RULES[id]?.label || id);
+  return [
+    `モード ${settingValueLabel('mode', snapshot.mode)}`,
+    `${snapshot.roundCount}ラウンド`,
+    `ランダム${snapshot.hiddenRuleCount}個`,
+    `縛り ${settingValueLabel('bindingMode', snapshot.bindingMode)}`,
+    `ローカル ${enabledRules.length ? enabledRules.join(' / ') : 'なし'}`
+  ].join(' / ');
+}
+
 function updateSettings(room, playerId, settings) {
   if (room.hostId !== playerId) {
     throw new Error('ホストのみ設定できます');
@@ -140,6 +220,8 @@ function updateSettings(room, playerId, settings) {
     throw new Error('ゲーム開始後は設定を変更できません');
   }
 
+  const player = requirePlayer(room, playerId);
+  const before = settingsSnapshot(room.settings);
   const previousMode = room.settings.mode;
   room.settings.mode = normalizeMode(settings.mode ?? room.settings.mode);
   room.settings.hiddenRuleCount = normalizeHiddenRuleCount(
@@ -152,7 +234,18 @@ function updateSettings(room, playerId, settings) {
       (modeChanged ? DEFAULT_BINDING_MODE_BY_MODE[room.settings.mode] : room.settings.bindingMode)
   );
   room.settings.localRules = normalizeLocalRuleSettings(settings.localRules ?? room.settings.localRules);
-  addEvent(room, 'ゲーム設定を更新しました', 'system');
+  const after = settingsSnapshot(room.settings);
+  const changes = settingsDiff(before, after);
+  if (changes.length > 0) {
+    addEvent(
+      room,
+      `${player.name}さんが設定を変更しました: ${changes
+        .map((change) => `${change.label} ${change.oldLabel} → ${change.newLabel}`)
+        .join(' / ')}`,
+      'settings',
+      { playerId, metadata: { changes } }
+    );
+  }
 }
 
 function addRule(room, playerId, input, options = {}) {
@@ -181,6 +274,10 @@ function addRule(room, playerId, input, options = {}) {
     id: options.id || makeId('rule'),
     order: room.rules.length,
     createdBy: options.system ? 'system' : playerId,
+    createdByName: player?.name || 'システム',
+    createdRound: room.match?.currentRound || null,
+    createdPhase: room.status,
+    createdAfterRound: room.match?.ruleBuilding?.afterRound || null,
     secret: Boolean(options.secret),
     revealed: !options.secret,
     generated: Boolean(options.generated),
@@ -189,9 +286,26 @@ function addRule(room, playerId, input, options = {}) {
   room.rules.push(rule);
 
   if (!rule.secret) {
-    addEvent(room, `${player?.name || 'システム'}さんが新しいルールを追加しました: ${describeRule(rule)}`, 'rule');
+    addEvent(
+      room,
+      `${player?.name || 'システム'}さんが新しいルールを追加しました: ${describeRule(rule)}`,
+      'rule',
+      {
+        playerId: options.system ? null : playerId,
+        metadata: {
+          ruleId: rule.id,
+          description: describeRule(rule),
+          createdBy: rule.createdBy,
+          createdByName: rule.createdByName,
+          createdAfterRound: rule.createdAfterRound
+        }
+      }
+    );
   } else {
-    addEvent(room, '隠しルールを追加しました', 'rule');
+    addEvent(room, '隠しルールを追加しました', 'rule', {
+      playerId: options.system ? null : playerId,
+      metadata: { ruleId: rule.id, createdBy: rule.createdBy, createdByName: rule.createdByName }
+    });
   }
 
   if (!options.system) {
@@ -223,6 +337,7 @@ function startGame(room, playerId, options = {}) {
     room.settings.bindingMode || DEFAULT_BINDING_MODE_BY_MODE[mode]
   );
   room.settings.localRules = normalizeLocalRuleSettings(room.settings.localRules);
+  const startSnapshot = settingsSnapshot(room.settings);
 
   if (mode === 'chaos' || mode === 'mystery') {
     const existingSignatures = room.rules.map((rule) => ruleSignature(rule));
@@ -247,7 +362,13 @@ function startGame(room, playerId, options = {}) {
     ruleAddOrder: MATCH_DEFAULTS.ruleAddOrder
   };
 
-  addEvent(room, `${MODES[mode].label}モードで${roundCount}ラウンドのマッチを開始しました`, 'system');
+  addEvent(room, `${MODES[mode].label}モードで${roundCount}ラウンドのマッチを開始しました`, 'system', {
+    playerId
+  });
+  addEvent(room, `ゲーム開始時設定: ${settingsSnapshotLabel(startSnapshot)}`, 'settings', {
+    playerId,
+    metadata: { snapshot: startSnapshot }
+  });
   startRound(room, options);
 }
 
