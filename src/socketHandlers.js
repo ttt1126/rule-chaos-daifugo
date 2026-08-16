@@ -1,7 +1,8 @@
 const { CPU_SPEEDS, DEFAULT_CPU_SPEED } = require('./constants');
 const {
   addEvent,
-  getLegalPlays
+  getLegalPlays,
+  getTriggeredRulesForPlay
 } = require('./gameLogic');
 const {
   chooseCpuCardsToGive,
@@ -151,7 +152,7 @@ function registerSocketHandlers(io, manager) {
     }
 
     if (task.type === 'turn') {
-      const move = chooseCpuPlay(room, task.player, getLegalPlays);
+      const move = chooseCpuPlay(room, task.player, { getLegalPlays, getTriggeredRulesForPlay });
       if (!move) {
         manager.passTurn(room, task.player.id);
         return;

@@ -9,6 +9,7 @@ const {
   chooseTransferCard,
   endGame,
   getLegalPlays,
+  getTriggeredRulesForPlay,
   getTurnAvailability,
   leavePlayer,
   passTurn,
@@ -30,7 +31,8 @@ const {
   chooseCpuDiscard,
   chooseCpuPlay,
   chooseCpuRule,
-  chooseCpuTarget
+  chooseCpuTarget,
+  scoreTriggeredEffects
 } = require('../src/cpuLogic');
 
 function card(id, rank, suit) {
@@ -89,6 +91,70 @@ function makeRoom(hands) {
       turnNumber: 1
     }
   };
+}
+
+function cpuPlayHelpers() {
+  return { getLegalPlays, getTriggeredRulesForPlay };
+}
+
+function driveAutomatedMatch(manager, room, hostId, options = {}) {
+  const maxSteps = options.maxSteps || 5000;
+  for (let step = 0; step < maxSteps; step += 1) {
+    if (room.status === 'matchResult' || room.status === 'finished') {
+      return step;
+    }
+
+    if (room.status === 'roundResult') {
+      manager.beginRuleBuilding(room, hostId);
+      continue;
+    }
+
+    if (room.status === 'ruleBuilding') {
+      const builderId = room.match.ruleBuilding.queue[room.match.ruleBuilding.currentIndex];
+      const builder = room.players.find((player) => player.id === builderId);
+      const rule = chooseCpuRule(room, builder, () => 0.33);
+      manager.addRule(room, builder.id, rule, { generated: Boolean(builder.isCPU) });
+      continue;
+    }
+
+    if (room.status !== 'playing' || !room.game) {
+      throw new Error(`想定外のフェーズです: ${room.status} / game=${Boolean(room.game)}`);
+    }
+
+    if (room.game.pendingAction) {
+      resolveAutomatedPendingAction(manager, room);
+      continue;
+    }
+
+    const player = room.players.find((candidate) => candidate.id === room.game.currentPlayerId);
+    const move = chooseCpuPlay(room, player, cpuPlayHelpers(), () => 0);
+    if (move) {
+      manager.playCards(room, player.id, move.cardIds);
+    } else {
+      manager.passTurn(room, player.id);
+    }
+  }
+
+  throw new Error(`CPU入りマッチが${maxSteps}手以内に完走しませんでした`);
+}
+
+function resolveAutomatedPendingAction(manager, room) {
+  const pending = room.game.pendingAction;
+  const actor = room.players.find((player) => player.id === pending.actorId);
+  if (pending.type === 'target') {
+    const targetPlayerId = chooseCpuTarget(room, pending, () => 0);
+    manager.chooseTarget(room, actor.id, pending.id, targetPlayerId);
+    return;
+  }
+  if (pending.type === 'giftCard') {
+    manager.chooseTransferCard(room, actor.id, pending.id, chooseCpuCardsToGive(actor, pending.requiredCount || 1));
+    return;
+  }
+  if (pending.type === 'discardCard') {
+    manager.chooseDiscardCards(room, actor.id, pending.id, chooseCpuDiscard(actor, pending.requiredCount || 1));
+    return;
+  }
+  throw new Error(`未対応のpending actionです: ${pending.type}`);
 }
 
 test('conditionPowerは条件から計算され、最大4で止まる', () => {
@@ -1236,7 +1302,7 @@ test('CPUの任意対象は効果に応じて自然な相手を選ぶ', () => {
   }, () => 0);
 
   assert.equal(skipTarget, 'p2');
-  assert.equal(giftTarget, 'p3');
+  assert.equal(giftTarget, 'p2');
 });
 
 test('CPUはルール追加フェーズで合法ルールを作成できる', () => {
@@ -1269,4 +1335,168 @@ test('CPUはルール追加フェーズで合法ルールを作成できる', ()
   assert.equal(added.createdByName, 'P1');
   assert.equal(added.generated, true);
   assert.equal(room.match.ruleBuilding.currentIndex, 1);
+});
+
+test('CPUはJOKER2枚で上がれる場合に2枚まとめて出す', () => {
+  const room = makeRoom({
+    p1: [joker('JK-1'), joker('JK-2')],
+    p2: [card('a', '8', 'S')]
+  });
+  room.players[0].isCPU = true;
+
+  const move = chooseCpuPlay(room, room.players[0], cpuPlayHelpers(), () => 0);
+
+  assert.deepEqual(new Set(move.cardIds), new Set(['JK-1', 'JK-2']));
+});
+
+test('CPUは通常カード2枚で上がれる場合に2枚まとめて出す', () => {
+  const room = makeRoom({
+    p1: [card('a', '7', 'S'), card('b', '7', 'H')],
+    p2: [card('c', '8', 'S')]
+  });
+  room.players[0].isCPU = true;
+
+  const move = chooseCpuPlay(room, room.players[0], cpuPlayHelpers(), () => 0);
+
+  assert.deepEqual(new Set(move.cardIds), new Set(['a', 'b']));
+});
+
+test('CPUは自分スキップを避けやすい', () => {
+  const room = makeRoom({
+    p1: [card('a', '7', 'S'), card('b', '8', 'H')],
+    p2: [card('c', '9', 'S')]
+  });
+  room.players[0].isCPU = true;
+  addRule(room, 'p1', {
+    condition: { rank: '7', suit: null, count: null, rankRelation: null, suitRelation: null },
+    target: 'self',
+    effect: 'skip',
+    effectConfig: {}
+  }, { system: true });
+
+  const move = chooseCpuPlay(room, room.players[0], cpuPlayHelpers(), () => 0);
+
+  assert.deepEqual(move.cardIds, ['b']);
+});
+
+test('CPUは相手スキップを狙いやすい', () => {
+  const room = makeRoom({
+    p1: [card('a', '7', 'S'), card('b', '8', 'H')],
+    p2: [card('c', '9', 'S')]
+  });
+  room.players[0].isCPU = true;
+  addRule(room, 'p1', {
+    condition: { rank: '7', suit: null, count: null, rankRelation: null, suitRelation: null },
+    target: 'next',
+    effect: 'skip',
+    effectConfig: {}
+  }, { system: true });
+
+  const move = chooseCpuPlay(room, room.players[0], cpuPlayHelpers(), () => 0);
+
+  assert.deepEqual(move.cardIds, ['a']);
+});
+
+test('CPU評価は複数ルール発動を合算する', () => {
+  const room = makeRoom({
+    p1: [card('a', '7', 'S'), card('b', '8', 'H')],
+    p2: [card('c', '9', 'S')]
+  });
+  const player = room.players[0];
+  room.settings.localRules.sevenGift = true;
+  addRule(room, 'p1', {
+    condition: { rank: '7', suit: null, count: null, rankRelation: null, suitRelation: null },
+    target: 'next',
+    effect: 'skip',
+    effectConfig: {}
+  }, { system: true });
+
+  const sevenMove = getLegalPlays(room, player).find((move) => move.cardIds[0] === 'a');
+  const rulesOnlyRoom = makeRoom({
+    p1: [card('a', '7', 'S'), card('b', '8', 'H')],
+    p2: [card('c', '9', 'S')]
+  });
+  addRule(rulesOnlyRoom, 'p1', {
+    condition: { rank: '7', suit: null, count: null, rankRelation: null, suitRelation: null },
+    target: 'next',
+    effect: 'skip',
+    effectConfig: {}
+  }, { system: true });
+  const singleSevenMove = getLegalPlays(rulesOnlyRoom, rulesOnlyRoom.players[0]).find((move) => move.cardIds[0] === 'a');
+
+  const combined = scoreTriggeredEffects(room, player, sevenMove, cpuPlayHelpers());
+  const single = scoreTriggeredEffects(rulesOnlyRoom, rulesOnlyRoom.players[0], singleSevenMove, cpuPlayHelpers());
+
+  assert.ok(combined > single);
+});
+
+test('CPUは10捨てを評価して近い強さの手より10を選びやすい', () => {
+  const room = makeRoom({
+    p1: [card('a', '10', 'S'), card('b', 'J', 'H')],
+    p2: [card('d', 'Q', 'S')]
+  });
+  room.players[0].isCPU = true;
+  room.settings.localRules.tenDiscard = true;
+
+  const move = chooseCpuPlay(room, room.players[0], cpuPlayHelpers(), () => 0);
+
+  assert.deepEqual(move.cardIds, ['a']);
+});
+
+test('CPUの渡す任意対象は手札最少の相手を選ぶ', () => {
+  const room = makeRoom({
+    p1: [card('a', '7', 'S')],
+    p2: [card('b', '8', 'S')],
+    p3: [card('c', '9', 'S'), card('d', '10', 'S'), card('e', 'J', 'S')]
+  });
+
+  const target = chooseCpuTarget(room, {
+    effect: 'gift',
+    eligibleTargetIds: ['p2', 'p3']
+  }, () => 0);
+
+  assert.equal(target, 'p2');
+});
+
+test('CPU入り2人マッチは4ラウンド完走できる', () => {
+  const manager = createRoomManager();
+  const { room, player: host } = manager.createRoom('A');
+  manager.addCpuPlayer(room, host.id);
+  manager.startGame(room, host.id);
+
+  const steps = driveAutomatedMatch(manager, room, host.id);
+
+  assert.equal(room.status, 'matchResult');
+  assert.equal(room.match.roundResults.length, 4);
+  assert.ok(steps > 0);
+});
+
+test('CPU3人入りマッチはローカルルール込みで完走できる', () => {
+  const manager = createRoomManager();
+  const { room, player: host } = manager.createRoom('A');
+  manager.addCpuPlayer(room, host.id);
+  manager.addCpuPlayer(room, host.id);
+  manager.addCpuPlayer(room, host.id);
+  manager.updateSettings(room, host.id, {
+    mode: 'normal',
+    hiddenRuleCount: 5,
+    roundCount: 3,
+    bindingMode: 'chaos',
+    cpuSpeed: 'fast',
+    localRules: { eightCut: true, fiveSkip: true, sevenGift: true, tenDiscard: true }
+  });
+  addRule(room, host.id, {
+    condition: { rank: '7', suit: null, count: 1, rankRelation: null, suitRelation: null },
+    target: 'any',
+    effect: 'skip',
+    effectConfig: {}
+  }, { system: true });
+  manager.startGame(room, host.id);
+
+  const steps = driveAutomatedMatch(manager, room, host.id, { maxSteps: 8000 });
+
+  assert.equal(room.status, 'matchResult');
+  assert.equal(room.match.roundResults.length, 3);
+  assert.equal(room.players.filter((player) => player.isCPU).length, 3);
+  assert.ok(steps > 0);
 });

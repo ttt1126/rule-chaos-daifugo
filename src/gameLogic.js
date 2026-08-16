@@ -1057,6 +1057,15 @@ function triggeredLocalRules(room, play) {
   return getTriggeredRules(localRules, play);
 }
 
+function getTriggeredRulesForPlay(room, play, options = {}) {
+  const customRules = options.includeHiddenRules === false
+    ? room.rules.filter((rule) => !rule.secret || rule.revealed)
+    : room.rules;
+  return dedupeMeaninglessEffects(
+    sortTriggeredRulesForQueue([...triggeredLocalRules(room, play), ...getTriggeredRules(customRules, play)])
+  );
+}
+
 function playCards(room, playerId, cardIds) {
   requirePlaying(room);
   if (isGamePaused(room)) {
@@ -1101,9 +1110,7 @@ function playCards(room, playerId, cardIds) {
     addEvent(room, `${player.name}さんの縛りが解除されました`, 'rule');
   }
 
-  const triggeredRules = dedupeMeaninglessEffects(
-    sortTriggeredRulesForQueue([...triggeredLocalRules(room, play), ...getTriggeredRules(room.rules, play)])
-  );
+  const triggeredRules = getTriggeredRulesForPlay(room, play);
   for (const rule of triggeredRules) {
     if (rule.secret && !rule.revealed) {
       rule.revealed = true;
@@ -1906,6 +1913,7 @@ module.exports = {
   endGame,
   getTurnAvailability,
   getLegalPlays,
+  getTriggeredRulesForPlay,
   getPlayer,
   isGamePaused,
   leavePlayer,
