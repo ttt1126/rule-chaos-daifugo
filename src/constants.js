@@ -58,6 +58,23 @@ const DEFAULT_BINDING_MODE_BY_MODE = {
   mystery: 'standard'
 };
 
+const CPU_SPEEDS = {
+  normal: {
+    id: 'normal',
+    label: '通常',
+    minMs: 800,
+    maxMs: 1800
+  },
+  fast: {
+    id: 'fast',
+    label: '高速',
+    minMs: 80,
+    maxMs: 180
+  }
+};
+
+const DEFAULT_CPU_SPEED = 'normal';
+
 const TARGETS = {
   none: { id: 'none', label: '対象なし', connector: 'GLOBAL' },
   self: { id: 'self', label: '自分', connector: 'SELF' },
@@ -139,7 +156,9 @@ module.exports = {
   CONDITION_POWER,
   CONNECTOR_ORDER,
   CONNECTORS,
+  CPU_SPEEDS,
   DEFAULT_BINDING_MODE_BY_MODE,
+  DEFAULT_CPU_SPEED,
   EFFECTS,
   HIDDEN_RULE_COUNTS,
   LOCAL_RULE_IDS,

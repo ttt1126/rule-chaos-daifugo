@@ -222,6 +222,12 @@ document.addEventListener('click', (event) => {
   if (action === 'copy-room-code') {
     copyRoomCode();
   }
+  if (action === 'add-cpu') {
+    emitAuthed('addCpuPlayer', {});
+  }
+  if (action === 'remove-cpu') {
+    emitAuthed('removeCpuPlayer', { cpuPlayerId: button.dataset.playerId });
+  }
   if (action === 'set-rule-target') {
     if (button.dataset.disabled === 'true') {
       showMessage(button.dataset.reason || 'この対象は現在の条件では接続できません');
@@ -318,6 +324,7 @@ document.addEventListener('change', (event) => {
       hiddenRuleCount: roomState.settings.hiddenRuleCount,
       roundCount: roomState.settings.roundCount,
       bindingMode: roomState.settings.bindingMode,
+      cpuSpeed: roomState.settings.cpuSpeed,
       localRules: { ...(roomState.settings.localRules || {}) }
     };
     const settingName = field.dataset.setting;
@@ -758,7 +765,11 @@ function renderRuleBuildingPhase() {
   return `
     <section class="status-banner pending">
       <strong>第${builder?.afterRound || ''}ラウンド後のルール追加フェーズ</strong>
-      <span>${escapeHtml(builderName)}さんがルールを作成中です</span>
+      <span>${escapeHtml(
+        roomState.cpuThinking
+          ? `${roomState.cpuThinking.playerName || builderName}が考え中...`
+          : `${builderName}さんがルールを作成中です`
+      )}</span>
     </section>
     <section class="content-grid rule-building-layout">
       <div class="main-column">
@@ -903,6 +914,11 @@ function renderTurnBanner() {
   if (game.paused) {
     return `<section class="status-banner paused"><strong>復帰待ち</strong><span>切断中プレイヤーが操作する場面です</span></section>`;
   }
+  if (roomState.cpuThinking) {
+    return `<section class="status-banner pending"><strong>${escapeHtml(
+      roomState.cpuThinking.playerName || 'CPU'
+    )}が考え中...</strong><span>${escapeHtml(`${roundLabel} / CPUが操作しています`)}</span></section>`;
+  }
   if (game.pendingAction && !game.pendingAction.waitingForYou) {
     return `<section class="status-banner pending"><strong>特殊ルール処理中</strong><span>${escapeHtml(
       game.pendingAction.actorName || ''
@@ -938,21 +954,33 @@ function renderPlayers() {
           .map((player) => {
             const turn = roomState.game?.currentPlayerId === player.id ? ' turn' : '';
             const you = player.isYou ? ' you' : '';
+            const cpu = player.isCPU ? ' cpu' : '';
             return `
-              <div class="player-row${turn}${you}">
+              <div class="player-row${turn}${you}${cpu}">
                 <div>
-                  <strong>${escapeHtml(player.name)}${player.isYou ? '（あなた）' : ''}</strong>
+                  <strong>${player.isCPU ? '<span class="cpu-mark" aria-label="CPU">CPU</span>' : ''}${escapeHtml(player.name)}${player.isYou ? '（あなた）' : ''}</strong>
                   <div class="player-meta">
                     ${player.isHost ? '<span>ホスト</span>' : ''}
+                    ${player.isCPU ? '<span>CPU</span>' : ''}
                     ${player.isRoundLeader ? '<span>親</span>' : ''}
-                    <span>${player.left ? '退出' : player.connected ? '接続中' : '切断中'}</span>
+                    <span>${player.left ? '退出' : player.isCPU ? 'サーバー操作' : player.connected ? '接続中' : '切断中'}</span>
+                    ${player.thinking ? '<span>考え中</span>' : ''}
                     ${roomState.match ? `<span>${player.score || 0}pt</span>` : ''}
                     ${player.finishedRank ? `<span>${player.finishedRank}位</span>` : ''}
                   </div>
                   ${renderPlayerStateBadges(player)}
                   ${renderSpectatorHand(player)}
                 </div>
-                <span class="card-count">${player.cardCount}枚</span>
+                <div class="player-side">
+                  <span class="card-count">${player.cardCount}枚</span>
+                  ${
+                    roomState.status === 'lobby' && roomState.isHost && player.isCPU
+                      ? `<button class="compact-button danger-light" data-click="remove-cpu" data-player-id="${escapeAttr(
+                          player.id
+                        )}" type="button">削除</button>`
+                      : ''
+                  }
+                </div>
               </div>
             `;
           })
@@ -1042,6 +1070,20 @@ function renderHostSettings() {
             ${option('chaos', 'カオス（同種もAND）', roomState.settings.bindingMode || 'standard')}
           </select>
         </label>
+        <label>
+          CPU速度
+          <select data-setting="cpuSpeed">
+            ${option('normal', '通常（0.8〜1.8秒）', roomState.settings.cpuSpeed || 'normal')}
+            ${option('fast', '高速（テスト用）', roomState.settings.cpuSpeed || 'normal')}
+          </select>
+        </label>
+      </div>
+      <div class="cpu-lobby-tools">
+        <div>
+          <h3>CPUプレイヤー</h3>
+          <p class="muted">人数が足りない枠をサーバー操作のCPUで埋められます。</p>
+        </div>
+        <button data-click="add-cpu" type="button" ${roomState.players.length >= 4 ? 'disabled' : ''}>CPUを追加</button>
       </div>
       <div class="local-rule-settings">
         <h3>ローカルルール</h3>

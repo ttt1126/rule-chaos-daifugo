@@ -1,7 +1,9 @@
 const crypto = require('crypto');
 const {
   BINDING_MODES,
+  CPU_SPEEDS,
   DEFAULT_BINDING_MODE_BY_MODE,
+  DEFAULT_CPU_SPEED,
   LOCAL_RULE_IDS,
   MODES,
   SUIT_SYMBOLS
@@ -48,6 +50,7 @@ function createRoomManager() {
         hiddenRuleCount: 5,
         roundCount: 4,
         bindingMode: DEFAULT_BINDING_MODE_BY_MODE.normal,
+        cpuSpeed: DEFAULT_CPU_SPEED,
         localRules: { ...DEFAULT_LOCAL_RULE_SETTINGS }
       },
       players: [player],
@@ -62,6 +65,49 @@ function createRoomManager() {
     rooms.set(code, room);
     addEvent(room, `${player.name}さんが部屋を作りました`, 'system');
     return { room, player, reconnectToken: player.reconnectToken };
+  }
+
+  function addCpuPlayer(room, playerId) {
+    if (room.hostId !== playerId) {
+      throw new Error('ホストのみCPUを追加できます');
+    }
+    if (room.status !== 'lobby') {
+      throw new Error('CPUは開始前だけ追加できます');
+    }
+    if (room.players.length >= MAX_PLAYERS) {
+      throw new Error('この部屋は満員です');
+    }
+
+    const player = createPlayer(nextCpuName(room), { isCPU: true });
+    room.players.push(player);
+    touch(room);
+    addEvent(room, `${player.name}を追加しました`, 'system', {
+      playerId,
+      metadata: { cpuPlayerId: player.id }
+    });
+    return player;
+  }
+
+  function removeCpuPlayer(room, playerId, cpuPlayerId) {
+    if (room.hostId !== playerId) {
+      throw new Error('ホストのみCPUを削除できます');
+    }
+    if (room.status !== 'lobby') {
+      throw new Error('CPUは開始前だけ削除できます');
+    }
+
+    const player = room.players.find((candidate) => candidate.id === cpuPlayerId);
+    if (!player || !player.isCPU) {
+      throw new Error('削除できるCPUが見つかりません');
+    }
+
+    room.players = room.players.filter((candidate) => candidate.id !== cpuPlayerId);
+    touch(room);
+    addEvent(room, `${player.name}を削除しました`, 'system', {
+      playerId,
+      metadata: { cpuPlayerId }
+    });
+    return player;
   }
 
   function joinRoom(code, name) {
@@ -83,6 +129,9 @@ function createRoomManager() {
   function reconnect(code, playerId, reconnectToken) {
     const room = requireRoom(code);
     const player = room.players.find((candidate) => candidate.id === playerId);
+    if (player?.isCPU) {
+      throw new Error('CPUには再接続できません');
+    }
     if (!player || player.reconnectToken !== reconnectToken) {
       throw new Error('再接続情報が一致しません');
     }
@@ -152,6 +201,8 @@ function createRoomManager() {
         bindingModeLabel:
           BINDING_MODES[room.settings.bindingMode || DEFAULT_BINDING_MODE_BY_MODE[room.settings.mode] || 'standard']
             ?.label || '標準',
+        cpuSpeed: CPU_SPEEDS[room.settings.cpuSpeed] ? room.settings.cpuSpeed : DEFAULT_CPU_SPEED,
+        cpuSpeedLabel: CPU_SPEEDS[room.settings.cpuSpeed || DEFAULT_CPU_SPEED]?.label || CPU_SPEEDS[DEFAULT_CPU_SPEED].label,
         localRules: normalizeLocalRuleSettings(room.settings.localRules)
       },
       players: room.players.map((player) => {
@@ -161,9 +212,11 @@ function createRoomManager() {
         return {
           id: player.id,
           name: player.name,
+          isCPU: Boolean(player.isCPU),
           isHost: player.id === room.hostId,
           isYou: player.id === viewerId,
           connected: player.connected,
+          thinking: room.cpuThinking?.playerId === player.id,
           left: Boolean(player.left),
           disconnectedAt: player.disconnectedAt,
           disconnectGraceMs: DISCONNECT_GRACE_MS,
@@ -212,6 +265,14 @@ function createRoomManager() {
             paused: isGamePaused(room),
             pendingAction,
             turnAvailability: getTurnAvailability(room, viewerId)
+          }
+        : null,
+      cpuThinking: room.cpuThinking
+        ? {
+            playerId: room.cpuThinking.playerId,
+            playerName: room.cpuThinking.playerName,
+            action: room.cpuThinking.action,
+            untilAt: room.cpuThinking.untilAt
           }
         : null,
       match: getPublicMatchState(room, viewerId),
@@ -265,6 +326,7 @@ function createRoomManager() {
 
   return {
     rooms,
+    addCpuPlayer: (room, playerId) => dispatch(room, () => addCpuPlayer(room, playerId)),
     createRoom,
     joinRoom,
     reconnect,
@@ -272,7 +334,9 @@ function createRoomManager() {
     detachSocket,
     getPublicState,
     requireRoom,
-    addRule: (room, playerId, input) => dispatch(room, () => addRule(room, playerId, input)),
+    removeCpuPlayer: (room, playerId, cpuPlayerId) =>
+      dispatch(room, () => removeCpuPlayer(room, playerId, cpuPlayerId)),
+    addRule: (room, playerId, input, options) => dispatch(room, () => addRule(room, playerId, input, options)),
     beginRuleBuilding: (room, playerId) => dispatch(room, () => beginRuleBuilding(room, playerId)),
     chooseTarget: (room, playerId, pendingId, targetPlayerId) =>
       dispatch(room, () => chooseTarget(room, playerId, pendingId, targetPlayerId)),
@@ -467,11 +531,24 @@ function normalizeName(name) {
   return normalized.slice(0, 16);
 }
 
-function createPlayer(name) {
+function nextCpuName(room) {
+  const used = new Set(room.players.filter((player) => player.isCPU).map((player) => player.name));
+  for (let index = 1; index <= MAX_PLAYERS; index += 1) {
+    const name = `CPU${index}`;
+    if (!used.has(name)) {
+      return name;
+    }
+  }
+  return `CPU${room.players.length + 1}`;
+}
+
+function createPlayer(name, options = {}) {
+  const isCPU = Boolean(options.isCPU);
   return {
     id: makeId('player'),
     name,
-    reconnectToken: makeReconnectToken(),
+    isCPU,
+    reconnectToken: isCPU ? null : makeReconnectToken(),
     connected: true,
     left: false,
     disconnectedAt: null,

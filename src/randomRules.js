@@ -16,10 +16,11 @@ function randomItem(items, rng) {
   return items[Math.floor(rng() * items.length)];
 }
 
-function weightedSlotCount(rng) {
-  const totalWeight = RANDOM_RULE_CONFIG.conditionSlotDistribution.reduce((sum, entry) => sum + entry.weight, 0);
+function weightedSlotCount(rng, config = RANDOM_RULE_CONFIG) {
+  const distribution = config.conditionSlotDistribution || RANDOM_RULE_CONFIG.conditionSlotDistribution;
+  const totalWeight = distribution.reduce((sum, entry) => sum + entry.weight, 0);
   let roll = rng() * totalWeight;
-  for (const entry of RANDOM_RULE_CONFIG.conditionSlotDistribution) {
+  for (const entry of distribution) {
     roll -= entry.weight;
     if (roll <= 0) return entry.slots;
   }
@@ -65,9 +66,9 @@ function applyConditionSlot(condition, slot, rng) {
   }
 }
 
-function buildCondition(target, rng) {
+function buildCondition(target, rng, config = RANDOM_RULE_CONFIG) {
   const condition = { rank: null, suit: null, count: null, rankRelation: null, suitRelation: null };
-  const desiredSlots = weightedSlotCount(rng);
+  const desiredSlots = weightedSlotCount(rng, config);
   const requiredPower = requiredPowerForTarget(target);
 
   for (const slot of randomConditionSlots(rng)) {
@@ -88,8 +89,9 @@ function buildCondition(target, rng) {
   return condition;
 }
 
-function buildEffectConfig(effect, rng) {
-  if (effect === 'bindRank' && rng() < RANDOM_RULE_CONFIG.fixedRankBindRate) {
+function buildEffectConfig(effect, rng, config = RANDOM_RULE_CONFIG) {
+  const fixedRankBindRate = config.fixedRankBindRate ?? RANDOM_RULE_CONFIG.fixedRankBindRate;
+  if (effect === 'bindRank' && rng() < fixedRankBindRate) {
     return { bindRank: randomItem(RANKS, rng) };
   }
   return {};
@@ -97,15 +99,22 @@ function buildEffectConfig(effect, rng) {
 
 function generateRandomRules(count, options = {}) {
   const rng = options.rng || Math.random;
-  const safeCount = HIDDEN_RULE_COUNTS.includes(Number(count)) ? Number(count) : 5;
+  const config = { ...RANDOM_RULE_CONFIG, ...(options.config || {}) };
+  const requestedCount = Number(count);
+  const safeCount = options.allowAnyCount
+    ? Math.max(1, Math.min(10, Number.isFinite(requestedCount) ? requestedCount : 1))
+    : HIDDEN_RULE_COUNTS.includes(requestedCount)
+      ? requestedCount
+      : 5;
   const startOrder = Number.isFinite(options.startOrder) ? options.startOrder : 0;
   const secret = Boolean(options.secret);
-  const effects = RANDOM_RULE_CONFIG.effectPool;
+  const effects = config.effectPool || RANDOM_RULE_CONFIG.effectPool;
   const rules = [];
   const seen = new Set(options.existingSignatures || []);
   let attempts = 0;
+  const maxAttempts = safeCount * (config.maxAttemptsPerRule || 60);
 
-  while (rules.length < safeCount && attempts < safeCount * 60) {
+  while (rules.length < safeCount && attempts < maxAttempts) {
     attempts += 1;
     const effect = randomItem(effects, rng);
     const targets = EFFECTS[effect].targets;
@@ -113,10 +122,10 @@ function generateRandomRules(count, options = {}) {
     let candidate;
     try {
       candidate = normalizeRuleInput({
-        condition: buildCondition(target, rng),
+        condition: buildCondition(target, rng, config),
         effect,
         target,
-        effectConfig: buildEffectConfig(effect, rng)
+        effectConfig: buildEffectConfig(effect, rng, config)
       });
     } catch (_error) {
       continue;

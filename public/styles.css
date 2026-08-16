@@ -279,6 +279,27 @@ form,
   margin: 14px 0;
 }
 
+.cpu-lobby-tools {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #f7fafc;
+  padding: 10px;
+}
+
+.cpu-lobby-tools h3,
+.cpu-lobby-tools p {
+  margin: 0;
+}
+
+.cpu-lobby-tools p {
+  margin-top: 3px;
+}
+
 .local-rule-settings h3,
 .rule-section h3,
 .trigger-preview-panel h3 {
@@ -427,6 +448,23 @@ form,
   background: #f8fbf4;
 }
 
+.player-row.cpu {
+  background: #f7fafc;
+}
+
+.cpu-mark {
+  display: inline-flex;
+  align-items: center;
+  margin-right: 6px;
+  border-radius: 999px;
+  background: #dce9f4;
+  color: #254f73;
+  padding: 2px 6px;
+  font-size: 0.66rem;
+  font-weight: 900;
+  vertical-align: middle;
+}
+
 .player-meta {
   display: flex;
   gap: 6px;
@@ -492,6 +530,18 @@ form,
   color: var(--blue);
   font-weight: 900;
   white-space: nowrap;
+}
+
+.player-side {
+  display: grid;
+  justify-items: end;
+  gap: 6px;
+}
+
+.danger-light {
+  border-color: #e2b8ad;
+  background: #fff5f2;
+  color: #8b2f1d;
 }
 
 .spectator-hand {
@@ -1327,6 +1377,11 @@ form,
   .top-actions {
     align-items: flex-end;
     flex-direction: column-reverse;
+  }
+
+  .cpu-lobby-tools {
+    align-items: stretch;
+    flex-direction: column;
   }
 
   .puzzle-builder {

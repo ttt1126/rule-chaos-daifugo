@@ -1,6 +1,8 @@
 const {
   BINDING_MODES,
+  CPU_SPEEDS,
   DEFAULT_BINDING_MODE_BY_MODE,
+  DEFAULT_CPU_SPEED,
   EFFECTS,
   LOCAL_RULE_IDS,
   MATCH_DEFAULTS,
@@ -138,6 +140,10 @@ function normalizeRoundCount(count) {
   return ROUND_COUNTS.includes(numeric) ? numeric : MATCH_DEFAULTS.roundCount;
 }
 
+function normalizeCpuSpeed(speed) {
+  return CPU_SPEEDS[speed] ? speed : DEFAULT_CPU_SPEED;
+}
+
 function settingsSnapshot(settings) {
   const mode = normalizeMode(settings.mode);
   const bindingMode = normalizeBindingMode(settings.bindingMode || DEFAULT_BINDING_MODE_BY_MODE[mode]);
@@ -146,6 +152,7 @@ function settingsSnapshot(settings) {
     hiddenRuleCount: normalizeHiddenRuleCount(settings.hiddenRuleCount),
     roundCount: normalizeRoundCount(settings.roundCount),
     bindingMode,
+    cpuSpeed: normalizeCpuSpeed(settings.cpuSpeed),
     localRules: normalizeLocalRuleSettings(settings.localRules)
   };
 }
@@ -155,6 +162,7 @@ function settingLabel(key) {
   if (key === 'hiddenRuleCount') return 'ランダムルール数';
   if (key === 'roundCount') return 'ラウンド数';
   if (key === 'bindingMode') return '縛りの競合';
+  if (key === 'cpuSpeed') return 'CPU速度';
   if (key.startsWith('localRules.')) {
     const ruleId = key.split('.')[1];
     return `ローカルルール: ${LOCAL_RULES[ruleId]?.label || ruleId}`;
@@ -167,6 +175,7 @@ function settingValueLabel(key, value) {
   if (key === 'hiddenRuleCount') return `${value}個`;
   if (key === 'roundCount') return `${value}ラウンド`;
   if (key === 'bindingMode') return BINDING_MODES[value]?.label || value;
+  if (key === 'cpuSpeed') return CPU_SPEEDS[value]?.label || value;
   if (key.startsWith('localRules.')) return value ? 'ON' : 'OFF';
   return String(value);
 }
@@ -176,7 +185,8 @@ function flattenSettings(snapshot) {
     mode: snapshot.mode,
     hiddenRuleCount: snapshot.hiddenRuleCount,
     roundCount: snapshot.roundCount,
-    bindingMode: snapshot.bindingMode
+    bindingMode: snapshot.bindingMode,
+    cpuSpeed: snapshot.cpuSpeed
   };
   for (const id of LOCAL_RULE_IDS) {
     flat[`localRules.${id}`] = Boolean(snapshot.localRules[id]);
@@ -208,6 +218,7 @@ function settingsSnapshotLabel(snapshot) {
     `${snapshot.roundCount}ラウンド`,
     `ランダム${snapshot.hiddenRuleCount}個`,
     `縛り ${settingValueLabel('bindingMode', snapshot.bindingMode)}`,
+    `CPU ${settingValueLabel('cpuSpeed', snapshot.cpuSpeed)}`,
     `ローカル ${enabledRules.length ? enabledRules.join(' / ') : 'なし'}`
   ].join(' / ');
 }
@@ -228,6 +239,7 @@ function updateSettings(room, playerId, settings) {
     settings.hiddenRuleCount ?? room.settings.hiddenRuleCount
   );
   room.settings.roundCount = normalizeRoundCount(settings.roundCount ?? room.settings.roundCount);
+  room.settings.cpuSpeed = normalizeCpuSpeed(settings.cpuSpeed ?? room.settings.cpuSpeed);
   const modeChanged = room.settings.mode !== previousMode;
   room.settings.bindingMode = normalizeBindingMode(
     settings.bindingMode ??
@@ -333,6 +345,7 @@ function startGame(room, playerId, options = {}) {
   const mode = normalizeMode(room.settings.mode);
   const hiddenRuleCount = normalizeHiddenRuleCount(room.settings.hiddenRuleCount);
   const roundCount = normalizeRoundCount(room.settings.roundCount);
+  room.settings.cpuSpeed = normalizeCpuSpeed(room.settings.cpuSpeed);
   room.settings.bindingMode = normalizeBindingMode(
     room.settings.bindingMode || DEFAULT_BINDING_MODE_BY_MODE[mode]
   );
@@ -668,7 +681,7 @@ function endGame(room, playerId) {
 
   room.players = room.players.filter((player) => !player.left);
   if (!room.players.some((player) => player.id === room.hostId)) {
-    room.hostId = room.players[0]?.id || null;
+    room.hostId = room.players.find((player) => !player.isCPU)?.id || null;
   }
 
   for (const player of room.players) {
@@ -789,27 +802,33 @@ function cardIdCombinations(cards, count) {
   return results;
 }
 
-function findFirstLegalPlay(room, player) {
-  if (!room.game || player.left || player.finishedRank || player.hand.length === 0) {
-    return null;
+function getLegalPlays(room, playerOrId) {
+  const player = typeof playerOrId === 'string' ? getPlayer(room, playerOrId) : playerOrId;
+  if (!room.game || !player || player.left || player.finishedRank || player.hand.length === 0) {
+    return [];
   }
 
   const counts = room.game.table
     ? [room.game.table.count]
     : [1, 2, 3, 4].filter((count) => count <= player.hand.length);
 
+  const plays = [];
   for (const count of counts) {
     for (const cardIds of cardIdCombinations(player.hand, count)) {
       try {
-        analyzePlay(room, player, cardIds);
-        return cardIds;
+        const play = analyzePlay(room, player, cardIds);
+        plays.push({ cardIds, play });
       } catch (_error) {
         // Try the next combination; analyzePlay is the single source of truth.
       }
     }
   }
 
-  return null;
+  return plays;
+}
+
+function findFirstLegalPlay(room, player) {
+  return getLegalPlays(room, player)[0]?.cardIds || null;
 }
 
 function hasLegalPlay(room, player) {
@@ -1748,14 +1767,14 @@ function leavePlayer(room, playerId) {
     const wasHost = room.hostId === playerId;
     room.players = room.players.filter((candidate) => candidate.id !== playerId);
     if (wasHost) {
-      room.hostId = room.players[0]?.id || null;
+      room.hostId = room.players.find((candidate) => !candidate.isCPU)?.id || null;
     }
     addEvent(room, `${playerName}さんが退出しました`, 'system');
     if (wasHost && room.hostId && room.players.length > 0) {
       const host = getPlayer(room, room.hostId);
       addEvent(room, `${host.name}さんがホストになりました`, 'system');
     }
-    return { roomClosed: room.players.length === 0 };
+    return { roomClosed: room.players.length === 0 || room.players.every((candidate) => candidate.isCPU) };
   }
 
   player.left = true;
@@ -1767,7 +1786,7 @@ function leavePlayer(room, playerId) {
   player.bindings = [];
 
   if (room.hostId === playerId) {
-    const nextHost = room.players.find((candidate) => !candidate.left);
+    const nextHost = room.players.find((candidate) => !candidate.left && !candidate.isCPU);
     room.hostId = nextHost?.id || null;
     if (nextHost) {
       addEvent(room, `${nextHost.name}さんがホストになりました`, 'system');
@@ -1786,7 +1805,7 @@ function leavePlayer(room, playerId) {
     }
   }
 
-  return { roomClosed: room.players.every((candidate) => candidate.left) };
+  return { roomClosed: room.players.every((candidate) => candidate.left || candidate.isCPU) };
 }
 
 function handlePlayingLeave(room, playerId) {
@@ -1886,6 +1905,7 @@ module.exports = {
   directionLabel,
   endGame,
   getTurnAvailability,
+  getLegalPlays,
   getPlayer,
   isGamePaused,
   leavePlayer,

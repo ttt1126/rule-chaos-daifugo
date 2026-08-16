@@ -8,6 +8,7 @@ const {
   chooseTarget,
   chooseTransferCard,
   endGame,
+  getLegalPlays,
   getTurnAvailability,
   leavePlayer,
   passTurn,
@@ -24,6 +25,13 @@ const {
   normalizeRuleInput
 } = require('../src/ruleEngine');
 const { generateRandomRules } = require('../src/randomRules');
+const {
+  chooseCpuCardsToGive,
+  chooseCpuDiscard,
+  chooseCpuPlay,
+  chooseCpuRule,
+  chooseCpuTarget
+} = require('../src/cpuLogic');
 
 function card(id, rank, suit) {
   return { id, rank, suit, joker: false };
@@ -1159,4 +1167,106 @@ test('ゲーム中の途中退出で残り1人になったらゲーム終了', (
   assert.equal(room.status, 'finished');
   assert.equal(room.players.find((player) => player.id === 'p1').finishedRank, 1);
   assert.equal(room.players.find((player) => player.id === 'p2').left, true);
+});
+
+test('ホストはロビーでCPUを追加・削除できる', () => {
+  const manager = createRoomManager();
+  const { room, player: host } = manager.createRoom('A');
+
+  const cpu = manager.addCpuPlayer(room, host.id);
+  const state = manager.getPublicState(room, host.id);
+
+  assert.equal(cpu.isCPU, true);
+  assert.equal(cpu.reconnectToken, null);
+  assert.equal(state.players.find((player) => player.id === cpu.id).isCPU, true);
+
+  manager.removeCpuPlayer(room, host.id, cpu.id);
+
+  assert.equal(room.players.some((player) => player.id === cpu.id), false);
+});
+
+test('人間1人とCPU1人でゲーム開始できる', () => {
+  const manager = createRoomManager();
+  const { room, player: host } = manager.createRoom('A');
+  manager.addCpuPlayer(room, host.id);
+
+  manager.startGame(room, host.id);
+
+  assert.equal(room.status, 'playing');
+  assert.equal(room.match.playerIds.length, 2);
+  assert.equal(room.players.some((player) => player.isCPU), true);
+});
+
+test('CPUは通常カードの合法手があればJOKERを温存しやすい', () => {
+  const room = makeRoom({
+    p1: [card('a', '4', 'S'), joker('JK-1')],
+    p2: [card('b', '8', 'S')]
+  });
+  room.players[0].isCPU = true;
+
+  const move = chooseCpuPlay(room, room.players[0], getLegalPlays, () => 0);
+
+  assert.ok(move);
+  assert.deepEqual(move.cardIds, ['a']);
+});
+
+test('CPUは渡す・10捨てで弱いカードから選ぶ', () => {
+  const player = {
+    hand: [card('a', '3', 'S'), card('b', '2', 'S'), joker('JK-1'), card('c', '5', 'H')]
+  };
+
+  assert.deepEqual(chooseCpuCardsToGive(player, 2), ['a', 'c']);
+  assert.deepEqual(chooseCpuDiscard(player, 1), ['a']);
+});
+
+test('CPUの任意対象は効果に応じて自然な相手を選ぶ', () => {
+  const room = makeRoom({
+    p1: [card('a', '7', 'S')],
+    p2: [card('b', '8', 'S')],
+    p3: [card('c', '9', 'S'), card('d', '10', 'S'), card('e', 'J', 'S')]
+  });
+
+  const skipTarget = chooseCpuTarget(room, {
+    effect: 'skip',
+    eligibleTargetIds: ['p2', 'p3']
+  }, () => 0);
+  const giftTarget = chooseCpuTarget(room, {
+    effect: 'gift',
+    eligibleTargetIds: ['p2', 'p3']
+  }, () => 0);
+
+  assert.equal(skipTarget, 'p2');
+  assert.equal(giftTarget, 'p3');
+});
+
+test('CPUはルール追加フェーズで合法ルールを作成できる', () => {
+  const room = makeRoom({
+    p1: [card('a', '7', 'S')],
+    p2: [card('b', '8', 'S')]
+  });
+  room.players[0].isCPU = true;
+  room.status = 'ruleBuilding';
+  room.game.phase = 'ruleBuilding';
+  room.match = {
+    currentRound: 1,
+    totalRounds: 4,
+    playerIds: ['p1', 'p2'],
+    scores: { p1: 0, p2: 0 },
+    roundResults: [],
+    finalResults: null,
+    ruleBuilding: {
+      afterRound: 1,
+      queue: ['p1', 'p2'],
+      currentIndex: 0,
+      addedRules: []
+    }
+  };
+
+  const rule = chooseCpuRule(room, room.players[0], () => 0.25);
+  const added = addRule(room, 'p1', rule, { generated: true });
+
+  assert.equal(added.createdBy, 'p1');
+  assert.equal(added.createdByName, 'P1');
+  assert.equal(added.generated, true);
+  assert.equal(room.match.ruleBuilding.currentIndex, 1);
 });
