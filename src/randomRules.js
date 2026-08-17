@@ -51,28 +51,33 @@ function shuffleArray(items, rng) {
 
 function applyConditionSlot(condition, slot, rng) {
   if (slot === 'rank' && !condition.rank) {
-    condition.rank = rng() < 0.08 ? 'JOKER' : randomItem(RANKS, rng);
+    condition.rank = !condition.suit && rng() < 0.08 ? 'JOKER' : randomItem(RANKS, rng);
     if (condition.rank === 'JOKER') {
       condition.suit = null;
     }
+    return true;
   } else if (slot === 'suit' && !condition.suit && condition.rank !== 'JOKER') {
     condition.suit = randomItem(SUITS, rng).id;
+    return true;
   } else if (slot === 'rankRelation' && !condition.rankRelation) {
     condition.rankRelation = 'plusOne';
+    return true;
   } else if (slot === 'suitRelation' && !condition.suitRelation) {
     condition.suitRelation = 'same';
+    return true;
   } else if (slot === 'count' && !condition.count) {
     condition.count = randomItem([1, 1, 2, 2, 3, 4], rng);
+    return true;
   }
+  return false;
 }
 
-function buildCondition(target, rng, config = RANDOM_RULE_CONFIG) {
+function buildConditionBySlotCount(slotCount, rng) {
   const condition = { rank: null, suit: null, count: null, rankRelation: null, suitRelation: null };
-  const desiredSlots = weightedSlotCount(rng, config);
-  const requiredPower = requiredPowerForTarget(target);
+  const desiredSlots = Math.max(1, Math.min(3, Number(slotCount) || 1));
 
   for (const slot of randomConditionSlots(rng)) {
-    if (conditionSlotCount(condition) >= desiredSlots && calculateConditionPower(condition) >= requiredPower) {
+    if (conditionSlotCount(condition) >= desiredSlots) {
       break;
     }
     applyConditionSlot(condition, slot, rng);
@@ -80,13 +85,42 @@ function buildCondition(target, rng, config = RANDOM_RULE_CONFIG) {
 
   const fallbackSlots = ['count', 'rank', 'suit', 'rankRelation', 'suitRelation'];
   for (const slot of fallbackSlots) {
-    if (calculateConditionPower(condition) >= requiredPower) {
+    if (conditionSlotCount(condition) >= desiredSlots) {
       break;
     }
     applyConditionSlot(condition, slot, rng);
   }
 
+  if (conditionSlotCount(condition) !== desiredSlots) {
+    return null;
+  }
+
   return condition;
+}
+
+function validTargetEffectPairs(condition, effects) {
+  const power = calculateConditionPower(condition);
+  const pairs = [];
+
+  for (const target of Object.keys(TARGETS)) {
+    if (power < requiredPowerForTarget(target)) {
+      continue;
+    }
+
+    const targetConnector = TARGETS[target]?.connector;
+    for (const effect of effects) {
+      const effectDefinition = EFFECTS[effect];
+      if (
+        effectDefinition &&
+        effectDefinition.targets.includes(target) &&
+        effectDefinition.connectors.includes(targetConnector)
+      ) {
+        pairs.push({ target, effect });
+      }
+    }
+  }
+
+  return pairs;
 }
 
 function buildEffectConfig(effect, rng, config = RANDOM_RULE_CONFIG) {
@@ -116,13 +150,22 @@ function generateRandomRules(count, options = {}) {
 
   while (rules.length < safeCount && attempts < maxAttempts) {
     attempts += 1;
-    const effect = randomItem(effects, rng);
-    const targets = EFFECTS[effect].targets;
-    const target = randomItem(targets, rng);
+    const desiredSlots = weightedSlotCount(rng, config);
+    const condition = buildConditionBySlotCount(desiredSlots, rng);
+    if (!condition) {
+      continue;
+    }
+
+    const pairs = validTargetEffectPairs(condition, effects);
+    if (pairs.length === 0) {
+      continue;
+    }
+
+    const { target, effect } = randomItem(pairs, rng);
     let candidate;
     try {
       candidate = normalizeRuleInput({
-        condition: buildCondition(target, rng, config),
+        condition,
         effect,
         target,
         effectConfig: buildEffectConfig(effect, rng, config)

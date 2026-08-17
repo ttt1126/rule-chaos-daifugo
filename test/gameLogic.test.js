@@ -23,10 +23,12 @@ const {
   conditionUnlocksTarget,
   effectSupportsTarget,
   getTriggeredRules,
-  normalizeRuleInput
+  normalizeRuleInput,
+  ruleSignature
 } = require('../src/ruleEngine');
 const { generateRandomRules } = require('../src/randomRules');
 const {
+  CPU_CONFIG,
   chooseCpuCardsToGive,
   chooseCpuDiscard,
   chooseCpuPlay,
@@ -41,6 +43,23 @@ function card(id, rank, suit) {
 
 function joker(id = 'JK-1') {
   return { id, rank: 'JOKER', suit: null, joker: true };
+}
+
+function seededRng(seed) {
+  let state = seed >>> 0;
+  return () => {
+    state += 0x6D2B79F5;
+    let value = state;
+    value = Math.imul(value ^ (value >>> 15), value | 1);
+    value ^= value + Math.imul(value ^ (value >>> 7), value | 61);
+    return ((value ^ (value >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+function ruleConditionSlotCount(rule) {
+  return ['rank', 'suit', 'count', 'rankRelation', 'suitRelation']
+    .filter((key) => Boolean(rule.condition[key]))
+    .length;
 }
 
 function makeRoom(hands) {
@@ -721,18 +740,18 @@ test('スキップでは縛りを消費せず、次の実行動機会まで維�
 
 test('空の場で縛りによる連続パス後、合法手のある次プレイヤーが場を開始できる', () => {
   const room = makeRoom({
-    p1: [card('a', '4', 'H')],
-    p2: [card('b', '5', 'D')],
-    p3: [card('c', '6', 'S')]
+    p1: [card('a', '10', 'H')],
+    p2: [card('b', 'J', 'D')],
+    p3: [card('c', '6', 'S'), card('d', '9', 'C')]
   });
   room.players.find((player) => player.id === 'p1').bindings = [{ type: 'suit', suits: ['S'] }];
   room.players.find((player) => player.id === 'p2').bindings = [{ type: 'rank', ranks: ['8'] }];
 
   passTurn(room, 'p1');
-  passTurn(room, 'p2');
 
   assert.equal(room.game.table, null);
   assert.equal(room.game.currentPlayerId, 'p3');
+  assert.equal(room.players.find((player) => player.id === 'p2').bindings.length, 0);
   playCards(room, 'p3', ['c']);
   assert.equal(room.game.table.rank, '6');
 });
@@ -746,7 +765,6 @@ test('空の場で全員が縛りによりパスした場合は縛りを解除�
   room.players.find((player) => player.id === 'p2').bindings = [{ type: 'rank', ranks: ['8'] }];
 
   passTurn(room, 'p1');
-  passTurn(room, 'p2');
 
   assert.equal(room.game.table, null);
   assert.equal(room.game.currentPlayerId, 'p1');
@@ -846,20 +864,74 @@ test('ローカルルールの10捨ては追加捨て待ちになり、捨てた
   assert.equal(room.players.find((player) => player.id === 'p1').hand.some((held) => held.id === 'b'), false);
 });
 
-test('カオス生成は階段縛りを作らず、1〜2条件中心に生成する', () => {
-  let seed = 1;
-  const rng = () => {
-    seed = (seed * 48271) % 0x7fffffff;
-    return seed / 0x7fffffff;
-  };
-  const rules = generateRandomRules(10, { rng });
-  const slotCounts = rules.map((rule) =>
-    ['rank', 'suit', 'count', 'rankRelation', 'suitRelation'].filter((key) => Boolean(rule.condition[key])).length
-  );
+test('カオス生成は完成結果も1条件中心になり、Powerと互換性を満たす', () => {
+  const rng = seededRng(20260817);
+  const rules = [];
+  for (let batch = 0; batch < 80; batch += 1) {
+    rules.push(...generateRandomRules(10, { rng, startOrder: batch * 10 }));
+  }
 
+  const slotCounts = rules.map(ruleConditionSlotCount);
+  const oneConditionRate = slotCounts.filter((count) => count === 1).length / rules.length;
+  const twoConditionRate = slotCounts.filter((count) => count === 2).length / rules.length;
+  const threeConditionRate = slotCounts.filter((count) => count === 3).length / rules.length;
+
+  assert.equal(rules.length, 800);
   assert.equal(rules.some((rule) => rule.effect === 'bindStep'), false);
-  assert.equal(slotCounts.every((count) => count >= 1 && count <= 3), true);
-  assert.equal(slotCounts.filter((count) => count <= 2).length >= 7, true);
+  assert.ok(oneConditionRate >= 0.55 && oneConditionRate <= 0.75);
+  assert.ok(twoConditionRate >= 0.2 && twoConditionRate <= 0.4);
+  assert.ok(threeConditionRate >= 0.02 && threeConditionRate <= 0.1);
+
+  for (const rule of rules) {
+    assert.ok(conditionUnlocksTarget(rule.condition, rule.target));
+    assert.ok(effectSupportsTarget(rule.effect, rule.target));
+    assert.equal(calculateConditionPower(rule.condition) >= 1, true);
+    if (rule.condition.rank === 'JOKER') {
+      assert.equal(rule.condition.suit, null);
+    }
+  }
+});
+
+test('カオス生成は同一バッチ内で同じルールを重複させない', () => {
+  const rules = generateRandomRules(10, { rng: seededRng(9012) });
+  const signatures = rules.map(ruleSignature);
+
+  assert.equal(rules.length, 10);
+  assert.equal(new Set(signatures).size, signatures.length);
+});
+
+test('CPU生成も完成結果が1条件中心になり、Powerと互換性を満たす', () => {
+  const room = makeRoom({
+    p1: [card('a', '7', 'S')],
+    p2: [card('b', '8', 'H')]
+  });
+  room.players[0].isCPU = true;
+  const rng = seededRng(11772);
+  const rules = [];
+
+  for (let index = 0; index < 500; index += 1) {
+    const rule = chooseCpuRule(room, room.players[0], rng);
+    assert.ok(rule);
+    rules.push(rule);
+  }
+
+  const slotCounts = rules.map(ruleConditionSlotCount);
+  const oneConditionRate = slotCounts.filter((count) => count === 1).length / rules.length;
+  const twoConditionCount = slotCounts.filter((count) => count === 2).length;
+  const threeConditionCount = slotCounts.filter((count) => count === 3).length;
+
+  assert.ok(oneConditionRate >= 0.62 && oneConditionRate <= 0.82);
+  assert.ok(twoConditionCount > 0);
+  assert.ok(threeConditionCount > 0);
+
+  for (const rule of rules) {
+    assert.ok(conditionUnlocksTarget(rule.condition, rule.target));
+    assert.ok(effectSupportsTarget(rule.effect, rule.target));
+    if (rule.condition.rank === 'JOKER') {
+      assert.equal(rule.condition.suit, null);
+    }
+  }
+  assert.equal(CPU_CONFIG.ruleGeneration.randomRuleConfig.conditionSlotDistribution[0].weight, 0.72);
 });
 
 test('隠しルールは発動後に公開される', () => {
@@ -1263,9 +1335,22 @@ test('人間1人とCPU1人でゲーム開始できる', () => {
   assert.equal(room.players.some((player) => player.isCPU), true);
 });
 
-test('CPUは通常カードの合法手があればJOKERを温存しやすい', () => {
+test('CPUは通常カードとJOKERで上がれる場合に2枚まとめて出す', () => {
   const room = makeRoom({
     p1: [card('a', '4', 'S'), joker('JK-1')],
+    p2: [card('b', '8', 'S')]
+  });
+  room.players[0].isCPU = true;
+
+  const move = chooseCpuPlay(room, room.players[0], getLegalPlays, () => 0);
+
+  assert.ok(move);
+  assert.deepEqual(new Set(move.cardIds), new Set(['a', 'JK-1']));
+});
+
+test('CPUは上がりでない通常手ではJOKERを温存しやすい', () => {
+  const room = makeRoom({
+    p1: [card('a', '4', 'S'), joker('JK-1'), card('c', '9', 'H')],
     p2: [card('b', '8', 'S')]
   });
   room.players[0].isCPU = true;
