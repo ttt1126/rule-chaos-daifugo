@@ -8,12 +8,65 @@ const RANDOM_RULE_CONFIG = {
     { slots: 2, weight: 0.3 },
     { slots: 3, weight: 0.05 }
   ],
+  effectWeights: {
+    gift: 1.3,
+    skip: 1.0,
+    bindSuit: 0.9,
+    bindRank: 0.9,
+    reverse: 0.6,
+    clear: 0.4
+  },
+  targetWeights: {
+    self: 0.15,
+    next: 1.0,
+    any: 0.8,
+    all: 0.5,
+    none: 1.0
+  },
   maxAttemptsPerRule: 100,
   fixedRankBindRate: 0.65
 };
 
 function randomItem(items, rng) {
   return items[Math.floor(rng() * items.length)];
+}
+
+function resolveConfig(config = {}) {
+  return {
+    ...RANDOM_RULE_CONFIG,
+    ...config,
+    effectWeights: {
+      ...RANDOM_RULE_CONFIG.effectWeights,
+      ...(config.effectWeights || {})
+    },
+    targetWeights: {
+      ...RANDOM_RULE_CONFIG.targetWeights,
+      ...(config.targetWeights || {})
+    }
+  };
+}
+
+function configuredWeight(weights, key) {
+  const value = Number(weights?.[key]);
+  return Number.isFinite(value) && value > 0 ? value : 1;
+}
+
+function weightedItem(items, rng, weightForItem) {
+  const weightedItems = items
+    .map((item) => ({ item, weight: Number(weightForItem(item)) }))
+    .filter((entry) => Number.isFinite(entry.weight) && entry.weight > 0);
+
+  if (weightedItems.length === 0) {
+    return null;
+  }
+
+  const totalWeight = weightedItems.reduce((sum, entry) => sum + entry.weight, 0);
+  let roll = rng() * totalWeight;
+  for (const entry of weightedItems) {
+    roll -= entry.weight;
+    if (roll <= 0) return entry.item;
+  }
+  return weightedItems[weightedItems.length - 1].item;
 }
 
 function weightedSlotCount(rng, config = RANDOM_RULE_CONFIG) {
@@ -98,29 +151,43 @@ function buildConditionBySlotCount(slotCount, rng) {
   return condition;
 }
 
-function validTargetEffectPairs(condition, effects) {
+function validTargetsForEffect(condition, effect) {
   const power = calculateConditionPower(condition);
-  const pairs = [];
+  const effectDefinition = EFFECTS[effect];
+  if (!effectDefinition) {
+    return [];
+  }
 
-  for (const target of Object.keys(TARGETS)) {
+  return effectDefinition.targets.filter((target) => {
     if (power < requiredPowerForTarget(target)) {
-      continue;
+      return false;
     }
 
     const targetConnector = TARGETS[target]?.connector;
-    for (const effect of effects) {
-      const effectDefinition = EFFECTS[effect];
-      if (
-        effectDefinition &&
-        effectDefinition.targets.includes(target) &&
-        effectDefinition.connectors.includes(targetConnector)
-      ) {
-        pairs.push({ target, effect });
-      }
-    }
+    return Boolean(targetConnector && effectDefinition.connectors.includes(targetConnector));
+  });
+}
+
+function chooseEffectAndTarget(condition, effects, rng, config = RANDOM_RULE_CONFIG) {
+  const effectCandidates = effects
+    .filter((effect) => validTargetsForEffect(condition, effect).length > 0);
+  const effect = weightedItem(
+    effectCandidates,
+    rng,
+    (candidate) => configuredWeight(config.effectWeights, candidate)
+  );
+  if (!effect) {
+    return null;
   }
 
-  return pairs;
+  const targetCandidates = validTargetsForEffect(condition, effect);
+  const target = weightedItem(
+    targetCandidates,
+    rng,
+    (candidate) => configuredWeight(config.targetWeights, candidate)
+  );
+
+  return target ? { effect, target } : null;
 }
 
 function buildEffectConfig(effect, rng, config = RANDOM_RULE_CONFIG) {
@@ -133,7 +200,7 @@ function buildEffectConfig(effect, rng, config = RANDOM_RULE_CONFIG) {
 
 function generateRandomRules(count, options = {}) {
   const rng = options.rng || Math.random;
-  const config = { ...RANDOM_RULE_CONFIG, ...(options.config || {}) };
+  const config = resolveConfig(options.config);
   const requestedCount = Number(count);
   const safeCount = options.allowAnyCount
     ? Math.max(1, Math.min(10, Number.isFinite(requestedCount) ? requestedCount : 1))
@@ -156,12 +223,12 @@ function generateRandomRules(count, options = {}) {
       continue;
     }
 
-    const pairs = validTargetEffectPairs(condition, effects);
-    if (pairs.length === 0) {
+    const effectAndTarget = chooseEffectAndTarget(condition, effects, rng, config);
+    if (!effectAndTarget) {
       continue;
     }
 
-    const { target, effect } = randomItem(pairs, rng);
+    const { target, effect } = effectAndTarget;
     let candidate;
     try {
       candidate = normalizeRuleInput({

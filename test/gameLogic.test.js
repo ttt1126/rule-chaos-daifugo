@@ -26,7 +26,7 @@ const {
   normalizeRuleInput,
   ruleSignature
 } = require('../src/ruleEngine');
-const { generateRandomRules } = require('../src/randomRules');
+const { RANDOM_RULE_CONFIG, generateRandomRules } = require('../src/randomRules');
 const {
   CPU_CONFIG,
   chooseCpuCardsToGive,
@@ -60,6 +60,49 @@ function ruleConditionSlotCount(rule) {
   return ['rank', 'suit', 'count', 'rankRelation', 'suitRelation']
     .filter((key) => Boolean(rule.condition[key]))
     .length;
+}
+
+function collectGeneratedRules(totalCount, batchSize, seed, options = {}) {
+  const rng = seededRng(seed);
+  const rules = [];
+  for (let batch = 0; rules.length < totalCount; batch += 1) {
+    rules.push(...generateRandomRules(batchSize, { ...options, rng, startOrder: batch * batchSize }));
+  }
+  return rules.slice(0, totalCount);
+}
+
+function summarizeGeneratedRules(rules) {
+  const slotCounts = { 1: 0, 2: 0, 3: 0 };
+  const targetCounts = { self: 0, next: 0, any: 0, all: 0, none: 0 };
+  const effectCounts = { gift: 0, skip: 0, bindSuit: 0, bindRank: 0, reverse: 0, clear: 0 };
+  let oneConditionSelfCount = 0;
+
+  for (const rule of rules) {
+    const slotCount = ruleConditionSlotCount(rule);
+    slotCounts[slotCount] = (slotCounts[slotCount] || 0) + 1;
+    targetCounts[rule.target] = (targetCounts[rule.target] || 0) + 1;
+    effectCounts[rule.effect] = (effectCounts[rule.effect] || 0) + 1;
+    if (slotCount === 1 && rule.target === 'self') {
+      oneConditionSelfCount += 1;
+    }
+  }
+
+  const total = rules.length;
+  const rate = (count, denominator = total) => count / denominator;
+  return {
+    slotRates: {
+      one: rate(slotCounts[1]),
+      two: rate(slotCounts[2]),
+      three: rate(slotCounts[3])
+    },
+    targetRates: Object.fromEntries(Object.entries(targetCounts).map(([target, count]) => [target, rate(count)])),
+    effectRates: Object.fromEntries(Object.entries(effectCounts).map(([effect, count]) => [effect, rate(count)])),
+    oneConditionSelfRate: rate(oneConditionSelfCount, slotCounts[1]),
+    skipBindRate: rate(effectCounts.skip + effectCounts.bindSuit + effectCounts.bindRank),
+    giftRate: rate(effectCounts.gift),
+    clearReverseRate: rate(effectCounts.clear + effectCounts.reverse),
+    effectCounts
+  };
 }
 
 function makeRoom(hands) {
@@ -865,22 +908,25 @@ test('ローカルルールの10捨ては追加捨て待ちになり、捨てた
 });
 
 test('カオス生成は完成結果も1条件中心になり、Powerと互換性を満たす', () => {
-  const rng = seededRng(20260817);
-  const rules = [];
-  for (let batch = 0; batch < 80; batch += 1) {
-    rules.push(...generateRandomRules(10, { rng, startOrder: batch * 10 }));
-  }
+  const rules = collectGeneratedRules(10000, 10, 20260818);
+  const summary = summarizeGeneratedRules(rules);
 
-  const slotCounts = rules.map(ruleConditionSlotCount);
-  const oneConditionRate = slotCounts.filter((count) => count === 1).length / rules.length;
-  const twoConditionRate = slotCounts.filter((count) => count === 2).length / rules.length;
-  const threeConditionRate = slotCounts.filter((count) => count === 3).length / rules.length;
-
-  assert.equal(rules.length, 800);
+  assert.equal(rules.length, 10000);
   assert.equal(rules.some((rule) => rule.effect === 'bindStep'), false);
-  assert.ok(oneConditionRate >= 0.55 && oneConditionRate <= 0.75);
-  assert.ok(twoConditionRate >= 0.2 && twoConditionRate <= 0.4);
-  assert.ok(threeConditionRate >= 0.02 && threeConditionRate <= 0.1);
+  assert.ok(summary.slotRates.one >= 0.6 && summary.slotRates.one <= 0.7);
+  assert.ok(summary.slotRates.two >= 0.25 && summary.slotRates.two <= 0.35);
+  assert.ok(summary.slotRates.three >= 0.02 && summary.slotRates.three <= 0.08);
+  assert.ok(summary.targetRates.self >= 0.15 && summary.targetRates.self <= 0.3);
+  assert.ok(summary.oneConditionSelfRate <= 0.4);
+  assert.ok(summary.targetRates.next >= 0.25);
+  assert.ok(summary.targetRates.any >= 0.05);
+  assert.ok(summary.skipBindRate >= 0.6 && summary.skipBindRate <= 0.78);
+  assert.ok(summary.giftRate >= 0.15 && summary.giftRate <= 0.3);
+  assert.ok(summary.clearReverseRate > 0);
+  assert.ok(summary.targetRates.self > 0);
+  for (const count of Object.values(summary.effectCounts)) {
+    assert.ok(count > 0);
+  }
 
   for (const rule of rules) {
     assert.ok(conditionUnlocksTarget(rule.condition, rule.target));
@@ -900,29 +946,42 @@ test('カオス生成は同一バッチ内で同じルールを重複させな�
   assert.equal(new Set(signatures).size, signatures.length);
 });
 
-test('CPU生成も完成結果が1条件中心になり、Powerと互換性を満たす', () => {
-  const room = makeRoom({
-    p1: [card('a', '7', 'S')],
-    p2: [card('b', '8', 'H')]
+test('ランダム生成は部分的な重み設定でも既定重みを維持する', () => {
+  assert.equal(RANDOM_RULE_CONFIG.effectWeights.gift, 1.3);
+  assert.equal(RANDOM_RULE_CONFIG.targetWeights.self, 0.15);
+
+  const rules = collectGeneratedRules(1000, 10, 8118, {
+    config: {
+      effectWeights: { gift: 2.5 },
+      targetWeights: { self: 0.05 }
+    }
   });
-  room.players[0].isCPU = true;
-  const rng = seededRng(11772);
-  const rules = [];
+  const summary = summarizeGeneratedRules(rules);
 
-  for (let index = 0; index < 500; index += 1) {
-    const rule = chooseCpuRule(room, room.players[0], rng);
-    assert.ok(rule);
-    rules.push(rule);
+  assert.equal(rules.length, 1000);
+  assert.ok(summary.effectRates.skip > 0);
+  assert.ok(summary.effectRates.bindSuit > 0);
+  assert.ok(summary.effectRates.bindRank > 0);
+  assert.ok(summary.clearReverseRate > 0);
+});
+
+test('CPU生成も完成結果が1条件中心になり、Powerと互換性を満たす', () => {
+  const rules = collectGeneratedRules(10000, 10, 11872, {
+    allowAnyCount: true,
+    config: CPU_CONFIG.ruleGeneration.randomRuleConfig
+  });
+  const summary = summarizeGeneratedRules(rules);
+
+  assert.equal(rules.length, 10000);
+  assert.ok(summary.slotRates.one >= 0.65 && summary.slotRates.one <= 0.8);
+  assert.ok(summary.slotRates.two >= 0.18 && summary.slotRates.two <= 0.3);
+  assert.ok(summary.slotRates.three >= 0.01 && summary.slotRates.three <= 0.06);
+  assert.ok(summary.targetRates.self <= 0.3);
+  assert.ok(summary.giftRate >= 0.15);
+  assert.ok(summary.skipBindRate <= 0.8);
+  for (const count of Object.values(summary.effectCounts)) {
+    assert.ok(count > 0);
   }
-
-  const slotCounts = rules.map(ruleConditionSlotCount);
-  const oneConditionRate = slotCounts.filter((count) => count === 1).length / rules.length;
-  const twoConditionCount = slotCounts.filter((count) => count === 2).length;
-  const threeConditionCount = slotCounts.filter((count) => count === 3).length;
-
-  assert.ok(oneConditionRate >= 0.62 && oneConditionRate <= 0.82);
-  assert.ok(twoConditionCount > 0);
-  assert.ok(threeConditionCount > 0);
 
   for (const rule of rules) {
     assert.ok(conditionUnlocksTarget(rule.condition, rule.target));
